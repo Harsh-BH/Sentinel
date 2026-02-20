@@ -3,7 +3,7 @@
 > **Distributed Remote Code Execution Engine** — Execute untrusted code safely at scale with sub-second latency.
 
 [![CI](https://github.com/Harsh-BH/Sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/Harsh-BH/Sentinel/actions)
-[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)](https://go.dev)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://react.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
@@ -48,9 +48,9 @@
 | Layer | Technology |
 |-------|-----------|
 | **Frontend** | React 18, TypeScript, Vite, Monaco Editor, Tailwind CSS |
-| **API Gateway** | Go 1.22, Gin, pgx/v5, gorilla/websocket |
+| **API Gateway** | Go 1.23, Gin, pgx/v5, gorilla/websocket |
 | **Message Broker** | RabbitMQ 3.13 (Quorum Queues, DLX) |
-| **Worker** | Go 1.22, nsjail, os/exec with process groups |
+| **Worker** | Go 1.23, nsjail, os/exec with process groups |
 | **Database** | PostgreSQL 16 (partitioned tables, UUIDv7) |
 | **Cache** | Redis 7 (idempotency locks, rate limiting) |
 | **Observability** | Prometheus + Grafana |
@@ -109,7 +109,7 @@ Sentinel/
 
 ### Prerequisites
 
-- **Go 1.22+**
+- **Go 1.23+**
 - **Node.js 20+** & npm
 - **Docker** & Docker Compose
 - **nsjail** (for local worker testing — [install guide](https://github.com/google/nsjail))
@@ -126,7 +126,7 @@ cp .env.example .env
 
 ```bash
 # Start PostgreSQL, RabbitMQ, Redis
-make dev-infra
+make up-infra
 
 # Run database migrations
 make migrate
@@ -152,9 +152,18 @@ Navigate to [http://localhost:5173](http://localhost:5173)
 ### Docker Compose (all-in-one)
 
 ```bash
-make up        # Start everything
-make down      # Stop everything
-make logs      # Follow logs
+make up          # Build & start everything
+make down        # Stop everything
+make down-clean  # Stop & remove volumes
+make logs        # Follow logs
+make health      # Check service health
+```
+
+### Integration Tests
+
+```bash
+# Run full E2E tests against Docker Compose stack
+make test-integration
 ```
 
 ---
@@ -221,14 +230,32 @@ GET /api/v1/languages
 ## Development
 
 ```bash
-make help          # Show all available commands
-make build         # Build all services
-make test          # Run all tests
-make lint          # Lint Go + Frontend
-make fmt           # Format Go code
-make deps          # Install all dependencies
-make clean         # Clean build artifacts
+make help               # Show all available commands
+make build              # Build all services
+make test               # Run all unit tests
+make test-integration   # Run E2E integration tests
+make lint               # Lint Go + Frontend
+make fmt                # Format Go code
+make deps               # Install all dependencies
+make clean              # Clean build artifacts
+make docker-build       # Build all Docker images
+make docker-push        # Push images to GHCR
+make health             # Check health of running services
 ```
+
+### CI/CD
+
+The CI pipeline (`.github/workflows/ci.yml`) runs automatically on every push and PR to `main`:
+
+| Job | What it does |
+|-----|-------------|
+| `lint-api` / `lint-worker` | golangci-lint on Go code |
+| `test-api` / `test-worker` | Unit tests with race detector + coverage |
+| `lint-frontend` / `build-frontend` | ESLint + Vite production build |
+| `integration-test` | Full Docker Compose stack + E2E test script |
+| `build-images` | Build & push to GHCR (main only, SHA + latest tags) |
+
+The deploy workflow (`.github/workflows/deploy.yml`) can be triggered manually or auto-fires after CI passes on `main`.
 
 ---
 
@@ -237,12 +264,12 @@ make clean         # Clean build artifacts
 See [MASTER_PLAN.md](./MASTER_PLAN.md) for the full 10-phase development plan:
 
 - ✅ **Phase 0**: Project scaffolding & local dev environment
-- 🔲 **Phase 1**: Sandbox development (nsjail hardening)
-- 🔲 **Phase 2**: Worker core (execution pipeline)
-- 🔲 **Phase 3**: API gateway (REST + WebSocket)
-- 🔲 **Phase 4**: Frontend (Monaco + results UI)
-- 🔲 **Phase 5**: Integration testing
-- 🔲 **Phase 6**: Observability (Prometheus + Grafana)
+- ✅ **Phase 1**: Sandbox development (nsjail hardening)
+- ✅ **Phase 2**: API gateway (REST + WebSocket + rate limiting)
+- ✅ **Phase 3**: Execution worker (ACK-after-execute, Prometheus metrics)
+- ✅ **Phase 4**: Frontend (Monaco editor, real-time results, history)
+- ✅ **Phase 5**: Dockerization & Docker Compose integration
+- ✅ **Phase 6**: CI/CD pipeline (GitHub Actions, GHCR, integration tests)
 - 🔲 **Phase 7**: Kubernetes deployment (k3s + KEDA)
 - 🔲 **Phase 8**: Performance & hardening
 - 🔲 **Phase 9**: Documentation & launch

@@ -1,0 +1,91 @@
+# =============================================================================
+# Project Sentinel — Deploy to k3s
+# =============================================================================
+# Triggered manually or on push to main after CI passes.
+# SSH into the k3s node, pull latest images, and restart deployments.
+#
+# Required secrets:
+#   K3S_HOST       — IP/hostname of the k3s node
+#   K3S_USER       — SSH user
+#   K3S_SSH_KEY    — Private SSH key (base64 or raw)
+# =============================================================================
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - production
+          - staging
+
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  NAMESPACE: sentinel
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to k3s
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    environment: ${{ github.event.inputs.environment || 'production' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.K3S_HOST }}
+          username: ${{ secrets.K3S_USER }}
+          key: ${{ secrets.K3S_SSH_KEY }}
+          script: |
+            set -e
+            echo "🚀 Deploying Sentinel to k3s..."
+
+            # Pull latest images
+            sudo crictl pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/sentinel-api:latest
+            sudo crictl pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/sentinel-worker:latest
+            sudo crictl pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/sentinel-frontend:latest
+
+            # Restart deployments to pick up new images
+            sudo kubectl -n ${{ env.NAMESPACE }} rollout restart deployment/sentinel-api
+            sudo kubectl -n ${{ env.NAMESPACE }} rollout restart deployment/sentinel-worker
+            sudo kubectl -n ${{ env.NAMESPACE }} rollout restart deployment/sentinel-frontend
+
+            # Wait for rollouts to complete
+            sudo kubectl -n ${{ env.NAMESPACE }} rollout status deployment/sentinel-api --timeout=120s
+            sudo kubectl -n ${{ env.NAMESPACE }} rollout status deployment/sentinel-worker --timeout=120s
+            sudo kubectl -n ${{ env.NAMESPACE }} rollout status deployment/sentinel-frontend --timeout=120s
+
+            echo "✅ Deployment complete"
+
+      - name: Verify deployment health
+        if: success()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.K3S_HOST }}
+          username: ${{ secrets.K3S_USER }}
+          key: ${{ secrets.K3S_SSH_KEY }}
+          script: |
+            echo "── Pod Status ──"
+            sudo kubectl -n ${{ env.NAMESPACE }} get pods -o wide
+            echo ""
+            echo "── Service Status ──"
+            sudo kubectl -n ${{ env.NAMESPACE }} get svc

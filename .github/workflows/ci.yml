@@ -1,6 +1,14 @@
 # =============================================================================
 # Project Sentinel — CI Pipeline
 # =============================================================================
+# Runs on every push/PR to main:
+#   1. Lint Go (API + Worker) with golangci-lint
+#   2. Unit test Go (API + Worker) with race detector + coverage
+#   3. Lint frontend (ESLint)
+#   4. Build frontend (tsc + vite)
+#   5. Integration test (docker-compose full stack + E2E script)
+#   6. Build & push Docker images to GHCR (main branch only)
+# =============================================================================
 
 name: CI
 
@@ -11,11 +19,17 @@ on:
     branches: [main]
 
 env:
-  GO_VERSION: "1.22"
+  GO_VERSION: "1.23"
   NODE_VERSION: "20"
+  REGISTRY: ghcr.io
+
+permissions:
+  contents: read
 
 jobs:
-  # ---------- Go API ----------
+  # ═══════════════════════════════════════════════════════════
+  # Go — Lint
+  # ═══════════════════════════════════════════════════════════
   lint-api:
     name: Lint API
     runs-on: ubuntu-latest
@@ -28,26 +42,8 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           working-directory: api
+          version: latest
 
-  test-api:
-    name: Test API
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: Run tests
-        working-directory: api
-        run: go test -v -race -coverprofile=coverage.out ./...
-      - name: Upload coverage
-        if: github.event_name == 'push'
-        uses: codecov/codecov-action@v4
-        with:
-          file: api/coverage.out
-          flags: api
-
-  # ---------- Go Worker ----------
   lint-worker:
     name: Lint Worker
     runs-on: ubuntu-latest
@@ -60,6 +56,30 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           working-directory: worker
+          version: latest
+
+  # ═══════════════════════════════════════════════════════════
+  # Go — Test
+  # ═══════════════════════════════════════════════════════════
+  test-api:
+    name: Test API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: api/go.sum
+      - name: Run tests
+        working-directory: api
+        run: go test -v -race -count=1 -coverprofile=coverage.out ./...
+      - name: Upload coverage
+        if: github.event_name == 'push'
+        uses: codecov/codecov-action@v4
+        with:
+          file: api/coverage.out
+          flags: api
+        continue-on-error: true
 
   test-worker:
     name: Test Worker
@@ -69,17 +89,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: worker/go.sum
       - name: Run tests
         working-directory: worker
-        run: go test -v -race -coverprofile=coverage.out ./...
+        run: go test -v -race -count=1 -coverprofile=coverage.out ./...
       - name: Upload coverage
         if: github.event_name == 'push'
         uses: codecov/codecov-action@v4
         with:
           file: worker/coverage.out
           flags: worker
+        continue-on-error: true
 
-  # ---------- Frontend ----------
+  # ═══════════════════════════════════════════════════════════
+  # Frontend — Lint & Build
+  # ═══════════════════════════════════════════════════════════
   lint-frontend:
     name: Lint Frontend
     runs-on: ubuntu-latest
@@ -88,6 +112,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
         working-directory: frontend
         run: npm ci
@@ -103,6 +129,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
         working-directory: frontend
         run: npm ci
@@ -110,52 +138,86 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-  # ---------- Integration Tests ----------
-  # integration-test:
-  #   name: Integration Tests
-  #   runs-on: ubuntu-latest
-  #   needs: [test-api, test-worker, build-frontend]
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Run integration tests
-  #       run: |
-  #         docker-compose -f docker-compose.yml up -d postgres rabbitmq redis
-  #         sleep 15
-  #         ./scripts/integration-test.sh
-  #         docker-compose down -v
-
-  # ---------- Docker Build & Push ----------
-  build-images:
-    name: Build Docker Images
+  # ═══════════════════════════════════════════════════════════
+  # Integration Tests (full Docker Compose stack)
+  # ═══════════════════════════════════════════════════════════
+  integration-test:
+    name: Integration Tests
     runs-on: ubuntu-latest
     needs: [test-api, test-worker, build-frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run full stack with integration tests
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.test.yml \
+            up --build --abort-on-container-exit --exit-code-from integration-test
+        timeout-minutes: 15
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.test.yml \
+            logs --tail=200 api worker
+
+      - name: Teardown
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.test.yml \
+            down -v --remove-orphans
+
+  # ═══════════════════════════════════════════════════════════
+  # Docker Build & Push to GHCR (main branch only)
+  # ═══════════════════════════════════════════════════════════
+  build-images:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: [test-api, test-worker, build-frontend, integration-test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       packages: write
       contents: read
+    strategy:
+      matrix:
+        include:
+          - image: sentinel-api
+            context: ./api
+            dockerfile: ./api/Dockerfile
+          - image: sentinel-worker
+            context: .
+            dockerfile: ./worker/Dockerfile
+          - image: sentinel-frontend
+            context: ./frontend
+            dockerfile: ./frontend/Dockerfile
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build & push API image
-        uses: docker/build-push-action@v5
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          context: ./api
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/sentinel-api:latest
-      - name: Build & push Worker image
-        uses: docker/build-push-action@v5
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Build & push ${{ matrix.image }}
+        uses: docker/build-push-action@v6
         with:
-          context: ./worker
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/sentinel-worker:latest
-      - name: Build & push Frontend image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./frontend
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/sentinel-frontend:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
