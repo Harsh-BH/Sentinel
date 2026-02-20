@@ -18,7 +18,7 @@ const (
 	queueName = "execution_tasks"
 
 	// Reconnection parameters
-	maxReconnectDelay = 30 * time.Second
+	maxReconnectDelay  = 30 * time.Second
 	baseReconnectDelay = 1 * time.Second
 )
 
@@ -30,9 +30,9 @@ type Consumer struct {
 	logger  *zap.Logger
 	jobs    chan<- *domain.JobMessage
 
-	mu       sync.Mutex
-	closed   bool
-	closeCh  chan struct{}
+	mu      sync.Mutex
+	closed  bool
+	closeCh chan struct{}
 }
 
 // NewConsumer creates a new RabbitMQ consumer.
