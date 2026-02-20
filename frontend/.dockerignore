@@ -1,0 +1,16 @@
+# Frontend .dockerignore — exclude unnecessary files from Docker build context
+node_modules/
+dist/
+.vite/
+coverage/
+.env
+.env.*
+*.md
+LICENSE
+.git
+.github
+.gitignore
+
+# IDE
+.vscode/
+.idea/

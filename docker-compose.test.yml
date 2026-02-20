@@ -1,0 +1,64 @@
+# =============================================================================
+# Project Sentinel — Docker Compose Test Override
+# =============================================================================
+# Used for CI integration tests.
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.test.yml up \
+#     --build --abort-on-container-exit --exit-code-from integration-test
+# =============================================================================
+
+services:
+  # Override: no persistent volumes for CI — use tmpfs for ephemeral data
+  postgres:
+    volumes:
+      - ./migrations/001_initial_schema.up.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
+    # Override: ephemeral data directory via environment
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel_secret
+      POSTGRES_DB: sentinel
+      PGDATA: /tmp/pgdata
+
+  rabbitmq:
+    volumes: []
+
+  redis:
+    volumes: []
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+
+  # Override: release mode for API in CI
+  api:
+    environment:
+      GIN_MODE: "release"
+      API_RATE_LIMIT: "10000"
+
+  # Override: single worker in CI
+  worker:
+    environment:
+      WORKER_POOL_SIZE: "2"
+
+  # ────────────── Integration Test Runner ──────────────
+  integration-test:
+    image: curlimages/curl:8.5.0
+    container_name: sentinel-integration-test
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    volumes:
+      - ./scripts/integration-test.sh:/test/integration-test.sh:ro
+    entrypoint: ["/bin/sh", "/test/integration-test.sh"]
+    networks:
+      - sentinel
+
+# Override: remove named volumes for CI (use tmpfs above)
+volumes:
+  pgdata:
+    driver: local
+  rabbitmqdata:
+    driver: local
+  redisdata:
+    driver: local

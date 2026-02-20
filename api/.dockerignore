@@ -1,0 +1,22 @@
+# API .dockerignore — exclude unnecessary files from Docker build context
+.git
+.github
+.gitignore
+.env
+.env.*
+*.md
+LICENSE
+
+# Build artifacts
+bin/
+tmp/
+*.test
+*.out
+coverage.out
+
+# IDE
+.vscode/
+.idea/
+
+# Other modules (api/ has its own context)
+# none needed — context is ./api

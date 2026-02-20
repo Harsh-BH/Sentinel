@@ -1,0 +1,37 @@
+# Worker .dockerignore — exclude unnecessary files from Docker build context
+# NOTE: Worker uses repo-root context (context: .) so we must be careful
+.git
+.github
+.gitignore
+.env
+.env.*
+*.md
+LICENSE
+
+# Frontend (not needed for worker build)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+
+# API (not needed for worker build)
+api/tmp/
+api/bin/
+
+# Build artifacts
+bin/
+*.test
+*.out
+coverage.out
+
+# IDE
+.vscode/
+.idea/
+
+# Infra & scripts (not needed in build)
+infra/
+migrations/
+scripts/
+
+# Docker files
+docker-compose*.yml
