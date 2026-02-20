@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import type { Job } from '../../types/submission';
-import { STATUS_COLORS, STATUS_LABELS, isTerminalStatus } from '../../types/submission';
+import { isTerminalStatus } from '../../types/submission';
+import { StatusBadge } from '../StatusBadge';
 
 interface ResultPanelProps {
   job: Job | null;
@@ -39,6 +41,7 @@ export default function ResultPanel({ job, isLoading, error }: ResultPanelProps)
           />
         </svg>
         <p className="text-sm">Run your code to see results here</p>
+        <p className="text-xs text-dark-600 mt-1">Ctrl+Enter to submit</p>
       </div>
     );
   }
@@ -57,13 +60,11 @@ export default function ResultPanel({ job, isLoading, error }: ResultPanelProps)
   const isComplete = isTerminalStatus(job.status);
 
   return (
-    <div className="panel overflow-hidden">
+    <div className="panel overflow-hidden animate-fade-in">
       {/* Status bar */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-dark-800">
         <div className="flex items-center gap-3">
-          <span className={`status-badge ${STATUS_COLORS[job.status]}`}>
-            {STATUS_LABELS[job.status]}
-          </span>
+          <StatusBadge status={job.status} size="md" />
           {!isComplete && (
             <div className="flex items-center gap-1.5">
               <div className="animate-spin w-3.5 h-3.5 border-2 border-sentinel-500 border-t-transparent rounded-full" />
@@ -75,13 +76,13 @@ export default function ResultPanel({ job, isLoading, error }: ResultPanelProps)
         {isComplete && (
           <div className="flex items-center gap-4 text-xs text-dark-500">
             {job.execution_time_ms !== null && (
-              <span>⏱ {job.execution_time_ms}ms</span>
+              <span title="Execution time">⏱ {job.execution_time_ms}ms</span>
             )}
             {job.memory_used_bytes !== null && (
-              <span>💾 {formatBytes(job.memory_used_bytes)}</span>
+              <span title="Memory used">💾 {formatBytes(job.memory_used_bytes)}</span>
             )}
             {job.exit_code !== null && (
-              <span>Exit: {job.exit_code}</span>
+              <span title="Exit code">Exit: {job.exit_code}</span>
             )}
           </div>
         )}
@@ -91,30 +92,12 @@ export default function ResultPanel({ job, isLoading, error }: ResultPanelProps)
       <div className="divide-y divide-dark-800">
         {/* stdout */}
         {job.stdout && (
-          <div className="p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-medium text-dark-500 uppercase tracking-wider">
-                stdout
-              </span>
-            </div>
-            <pre className="text-sm font-mono text-green-400 bg-dark-950 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
-              {job.stdout}
-            </pre>
-          </div>
+          <OutputBlock label="stdout" content={job.stdout} colorClass="text-green-400" />
         )}
 
         {/* stderr */}
         {job.stderr && (
-          <div className="p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-medium text-dark-500 uppercase tracking-wider">
-                stderr
-              </span>
-            </div>
-            <pre className="text-sm font-mono text-red-400 bg-dark-950 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
-              {job.stderr}
-            </pre>
-          </div>
+          <OutputBlock label="stderr" content={job.stderr} colorClass="text-red-400" />
         )}
 
         {/* No output */}
@@ -124,6 +107,70 @@ export default function ResultPanel({ job, isLoading, error }: ResultPanelProps)
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Reusable output block with copy button. */
+function OutputBlock({
+  label,
+  content,
+  colorClass,
+}: {
+  label: string;
+  content: string;
+  colorClass: string;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard API unavailable
+    }
+  };
+
+  return (
+    <div className="p-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-medium text-dark-500 uppercase tracking-wider">
+          {label}
+        </span>
+        <button
+          onClick={handleCopy}
+          className="text-xs text-dark-600 hover:text-dark-300 transition-colors flex items-center gap-1"
+          title="Copy to clipboard"
+        >
+          {copied ? (
+            <>
+              <svg className="w-3.5 h-3.5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+              Copied
+            </>
+          ) : (
+            <>
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                />
+              </svg>
+              Copy
+            </>
+          )}
+        </button>
+      </div>
+      <pre
+        className={`text-sm font-mono ${colorClass} bg-dark-950 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-words max-h-64 overflow-y-auto`}
+      >
+        {content}
+      </pre>
     </div>
   );
 }
