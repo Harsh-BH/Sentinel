@@ -1,0 +1,82 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: sentinel-worker-scaledobject
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-worker
+    app.kubernetes.io/component: autoscaler
+    app.kubernetes.io/part-of: sentinel
+spec:
+  scaleTargetRef:
+    name: sentinel-worker
+  pollingInterval: 5          # Check queue every 5s
+  cooldownPeriod: 30          # Wait 30s before scaling down
+  minReplicaCount: 1          # Always keep at least 1 worker
+  maxReplicaCount: 10         # Max 10 worker pods
+  fallback:
+    failureThreshold: 3
+    replicas: 2               # Fallback to 2 replicas if metrics fail
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: amqp
+        queueName: execution_tasks
+        mode: QueueLength
+        value: "5"            # Scale up when >5 messages per worker
+      authenticationRef:
+        name: sentinel-rabbitmq-trigger-auth
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: sentinel-rabbitmq-trigger-auth
+  namespace: sentinel
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: sentinel-worker-secrets
+      key: RABBITMQ_URL
+---
+# HorizontalPodAutoscaler for API (CPU-based fallback)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: sentinel-api-hpa
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-api
+    app.kubernetes.io/component: autoscaler
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: sentinel-api
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 120
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

@@ -1,0 +1,141 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sentinel-rabbitmq
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-rabbitmq
+    app.kubernetes.io/component: messaging
+    app.kubernetes.io/part-of: sentinel
+spec:
+  serviceName: sentinel-rabbitmq
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-rabbitmq
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sentinel-rabbitmq
+        app.kubernetes.io/component: messaging
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13-management-alpine
+          ports:
+            - name: amqp
+              containerPort: 5672
+              protocol: TCP
+            - name: management
+              containerPort: 15672
+              protocol: TCP
+            - name: metrics
+              containerPort: 15692
+              protocol: TCP
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-rabbitmq-secrets
+                  key: RABBITMQ_USER
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-rabbitmq-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: RABBITMQ_DEFAULT_VHOST
+              value: /
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+            - name: rabbitmq-config
+              mountPath: /etc/rabbitmq/conf.d/20-custom.conf
+              subPath: rabbitmq.conf
+              readOnly: true
+          livenessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - -q
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - -q
+                - check_running
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: rabbitmq-config
+          configMap:
+            name: sentinel-rabbitmq-config
+  volumeClaimTemplates:
+    - metadata:
+        name: rabbitmq-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
+        storageClassName: local-path
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel-rabbitmq
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-rabbitmq
+    app.kubernetes.io/component: messaging
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5672
+      targetPort: amqp
+      protocol: TCP
+      name: amqp
+    - port: 15672
+      targetPort: management
+      protocol: TCP
+      name: management
+  selector:
+    app.kubernetes.io/name: sentinel-rabbitmq
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sentinel-rabbitmq-secrets
+  namespace: sentinel
+type: Opaque
+stringData:
+  RABBITMQ_USER: sentinel
+  RABBITMQ_PASSWORD: changeme
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-rabbitmq-config
+  namespace: sentinel
+data:
+  rabbitmq.conf: |
+    # Prometheus metrics
+    prometheus.return_per_object_metrics = true
+    # Memory watermark
+    vm_memory_high_watermark.relative = 0.7
+    # Disk free limit
+    disk_free_limit.relative = 1.5

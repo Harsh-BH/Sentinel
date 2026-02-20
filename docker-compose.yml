@@ -1,0 +1,130 @@
+# =============================================================================
+# Project Sentinel — Local Development Stack
+# =============================================================================
+# Usage:
+#   docker-compose up -d          # Start infrastructure services
+#   docker-compose up --build     # Build and start all services
+#   docker-compose down -v        # Stop and remove volumes
+# =============================================================================
+
+services:
+  # ---------- PostgreSQL 16 ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: sentinel-postgres
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel_secret
+      POSTGRES_DB: sentinel
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/001_initial_schema.up.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------- RabbitMQ 3.13 ----------
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: sentinel-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: sentinel
+      RABBITMQ_DEFAULT_PASS: sentinel_secret
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------- Redis 7 ----------
+  redis:
+    image: redis:7-alpine
+    container_name: sentinel-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------- API Server ----------
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: sentinel-api
+    ports:
+      - "8080:8080"
+    environment:
+      API_PORT: 8080
+      GIN_MODE: debug
+      DATABASE_URL: postgres://sentinel:sentinel_secret@postgres:5432/sentinel?sslmode=disable
+      RABBITMQ_URL: amqp://sentinel:sentinel_secret@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------- Execution Worker ----------
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    container_name: sentinel-worker
+    privileged: true   # Required for nsjail namespace creation
+    environment:
+      DATABASE_URL: postgres://sentinel:sentinel_secret@postgres:5432/sentinel?sslmode=disable
+      RABBITMQ_URL: amqp://sentinel:sentinel_secret@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
+      WORKER_POOL_SIZE: 4
+      WORKER_METRICS_PORT: 9090
+      WORKER_NSJAIL_PATH: /usr/bin/nsjail
+      WORKER_SANDBOX_CONFIG_DIR: /etc/sentinel/nsjail
+      WORKER_POLICY_DIR: /etc/sentinel/policies
+    ports:
+      - "9090:9090"    # Prometheus metrics
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------- Frontend (Dev) ----------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sentinel-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  rabbitmqdata:
+  redisdata:
