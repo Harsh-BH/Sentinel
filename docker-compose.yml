@@ -1,14 +1,16 @@
 # =============================================================================
-# Project Sentinel — Local Development Stack
+# Project Sentinel — Docker Compose (Local Development Stack)
 # =============================================================================
 # Usage:
-#   docker-compose up -d          # Start infrastructure services
-#   docker-compose up --build     # Build and start all services
-#   docker-compose down -v        # Stop and remove volumes
+#   docker-compose up -d                 # Start all services
+#   docker-compose up --build            # Rebuild and start
+#   docker-compose up -d postgres rabbitmq redis  # Infra only
+#   docker-compose down -v               # Stop and remove volumes
+#   docker-compose logs -f api worker    # Tail specific logs
 # =============================================================================
 
 services:
-  # ---------- PostgreSQL 16 ----------
+  # ────────────── PostgreSQL 16 ──────────────
   postgres:
     image: postgres:16-alpine
     container_name: sentinel-postgres
@@ -26,9 +28,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
     restart: unless-stopped
+    networks:
+      - sentinel
 
-  # ---------- RabbitMQ 3.13 ----------
+  # ────────────── RabbitMQ 3.13 ──────────────
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     container_name: sentinel-rabbitmq
@@ -45,12 +50,16 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
+      start_period: 20s
     restart: unless-stopped
+    networks:
+      - sentinel
 
-  # ---------- Redis 7 ----------
+  # ────────────── Redis 7 ──────────────
   redis:
     image: redis:7-alpine
     container_name: sentinel-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
       - "6379:6379"
     volumes:
@@ -60,9 +69,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 5s
     restart: unless-stopped
+    networks:
+      - sentinel
 
-  # ---------- API Server ----------
+  # ────────────── API Server (Go/Gin) ──────────────
   api:
     build:
       context: ./api
@@ -71,11 +83,14 @@ services:
     ports:
       - "8080:8080"
     environment:
-      API_PORT: 8080
-      GIN_MODE: debug
-      DATABASE_URL: postgres://sentinel:sentinel_secret@postgres:5432/sentinel?sslmode=disable
-      RABBITMQ_URL: amqp://sentinel:sentinel_secret@rabbitmq:5672/
-      REDIS_URL: redis://redis:6379/0
+      API_PORT: "8080"
+      GIN_MODE: "debug"
+      API_RATE_LIMIT: "100"
+      API_READ_TIMEOUT: "10s"
+      API_WRITE_TIMEOUT: "30s"
+      DATABASE_URL: "postgres://sentinel:sentinel_secret@postgres:5432/sentinel?sslmode=disable"
+      RABBITMQ_URL: "amqp://sentinel:sentinel_secret@rabbitmq:5672/"
+      REDIS_URL: "redis://redis:6379/0"
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,24 +98,34 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
+    networks:
+      - sentinel
 
-  # ---------- Execution Worker ----------
+  # ────────────── Execution Worker ──────────────
   worker:
     build:
       context: .
       dockerfile: worker/Dockerfile
     container_name: sentinel-worker
-    privileged: true   # Required for nsjail namespace creation
+    privileged: true   # Required for nsjail namespace creation (CLONE_NEWUSER, etc.)
     environment:
-      DATABASE_URL: postgres://sentinel:sentinel_secret@postgres:5432/sentinel?sslmode=disable
-      RABBITMQ_URL: amqp://sentinel:sentinel_secret@rabbitmq:5672/
-      REDIS_URL: redis://redis:6379/0
-      WORKER_POOL_SIZE: 4
-      WORKER_METRICS_PORT: 9090
-      WORKER_NSJAIL_PATH: /usr/bin/nsjail
-      WORKER_SANDBOX_CONFIG_DIR: /etc/sentinel/nsjail
-      WORKER_POLICY_DIR: /etc/sentinel/policies
+      DATABASE_URL: "postgres://sentinel:sentinel_secret@postgres:5432/sentinel?sslmode=disable"
+      RABBITMQ_URL: "amqp://sentinel:sentinel_secret@rabbitmq:5672/"
+      REDIS_URL: "redis://redis:6379/0"
+      WORKER_POOL_SIZE: "4"
+      WORKER_METRICS_PORT: "9090"
+      WORKER_NSJAIL_PATH: "/usr/bin/nsjail"
+      WORKER_SANDBOX_CONFIG_DIR: "/etc/sentinel/nsjail"
+      WORKER_POLICY_DIR: "/etc/sentinel/policies"
+      WORKER_DEFAULT_TIME_LIMIT_MS: "5000"
+      WORKER_DEFAULT_MEMORY_LIMIT_KB: "262144"
     ports:
       - "9090:9090"    # Prometheus metrics
     depends_on:
@@ -110,9 +135,17 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
+    networks:
+      - sentinel
 
-  # ---------- Frontend (Dev) ----------
+  # ────────────── Frontend (nginx + SPA) ──────────────
   frontend:
     build:
       context: ./frontend
@@ -121,10 +154,28 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/nginx-health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
+    networks:
+      - sentinel
 
+# ────────────── Volumes ──────────────
 volumes:
   pgdata:
+    driver: local
   rabbitmqdata:
+    driver: local
   redisdata:
+    driver: local
+
+# ────────────── Networks ──────────────
+networks:
+  sentinel:
+    driver: bridge

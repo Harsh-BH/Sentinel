@@ -1,25 +1,28 @@
+# =============================================================================
+# Project Sentinel — API Server Dockerfile
+# Multi-stage build: Go compile → minimal Alpine runtime
+# =============================================================================
+
 # ── Stage 1: Build ──────────────────────────────────────────
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
 WORKDIR /build
 
-# Cache deps
+# Cache Go module downloads (rarely changes)
 COPY go.mod go.sum ./
-RUN go mod download
+RUN go mod download && go mod verify
 
-# Copy source
+# Copy source and build a static binary
 COPY . .
-
-# Build binary
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-w -s" -o /sentinel-api ./cmd/server
+    go build -trimpath -ldflags="-w -s" -o /sentinel-api ./cmd/server
 
 # ── Stage 2: Runtime ───────────────────────────────────────
-FROM alpine:3.19
+FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk add --no-cache ca-certificates tzdata curl && \
     addgroup -S sentinel && \
     adduser -S -G sentinel sentinel
 
@@ -29,7 +32,7 @@ USER sentinel
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget -qO- http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=5 \
+    CMD curl -sf http://localhost:8080/api/v1/health || exit 1
 
 ENTRYPOINT ["sentinel-api"]
