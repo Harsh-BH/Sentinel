@@ -1,0 +1,141 @@
+/* =============================================================================
+ * Kafel seccomp-bpf policy for C++17 compilation and execution
+ * Project Sentinel
+ *
+ * Extends the Python policy with additional syscalls needed by g++ compiler.
+ * =============================================================================
+ */
+
+POLICY cpp {
+  /* File I/O */
+  ALLOW {
+    read,
+    write,
+    openat,
+    close,
+    fstat,
+    newfstatat,
+    statx,
+    lseek,
+    lstat,
+    stat,
+    access,
+    faccessat,
+    faccessat2,
+    getcwd,
+    readlink,
+    readlinkat,
+    getdents64,
+    dup,
+    dup2,
+    dup3,
+    fcntl,
+    ioctl,
+    pipe,
+    pipe2,
+    /* Additional for g++ compilation */
+    rename,
+    renameat,
+    renameat2,
+    unlink,
+    unlinkat,
+    mkdir,
+    mkdirat,
+    symlink,
+    symlinkat,
+    chmod,
+    fchmod,
+    fchmodat,
+    chown,
+    fchown,
+    fchownat,
+    truncate,
+    ftruncate
+  }
+
+  /* Memory management */
+  ALLOW {
+    brk,
+    mmap,
+    mprotect,
+    munmap,
+    mremap,
+    madvise
+  }
+
+  /* Process lifecycle — g++ spawns child processes */
+  ALLOW {
+    execve,
+    exit_group,
+    exit,
+    clone,
+    clone3,
+    vfork,
+    wait4,
+    waitid,
+    getpid,
+    getppid,
+    gettid,
+    getuid,
+    getgid,
+    geteuid,
+    getegid,
+    getgroups,
+    setgroups,
+    getpgid,
+    setpgid,
+    getpgrp,
+    setsid
+  }
+
+  /* Signals */
+  ALLOW {
+    rt_sigaction,
+    rt_sigprocmask,
+    rt_sigreturn,
+    sigaltstack,
+    kill,           /* g++ may send signals to child processes */
+    tgkill
+  }
+
+  /* Thread synchronization */
+  ALLOW {
+    futex,
+    set_tid_address,
+    set_robust_list,
+    get_robust_list,
+    rseq
+  }
+
+  /* System information */
+  ALLOW {
+    uname,
+    sysinfo,
+    arch_prctl,
+    prlimit64,
+    getrandom
+  }
+
+  /* Time */
+  ALLOW {
+    clock_gettime,
+    clock_getres,
+    gettimeofday,
+    nanosleep,
+    clock_nanosleep
+  }
+
+  /* Misc */
+  ALLOW {
+    poll,
+    ppoll,
+    select,
+    pselect6,
+    epoll_create1,
+    epoll_ctl,
+    epoll_wait,
+    eventfd2
+  }
+}
+
+USE cpp DEFAULT KILL

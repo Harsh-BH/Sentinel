@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentinel-api
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: sentinel
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sentinel-api
+        app.kubernetes.io/component: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: sentinel-api
+      containers:
+        - name: api
+          image: ghcr.io/harsh-bh/sentinel-api:latest
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: sentinel-api-config
+            - secretRef:
+                name: sentinel-api-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel-api
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-api
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: sentinel-api
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sentinel-api
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-api
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-api-config
+  namespace: sentinel
+data:
+  SERVER_PORT: "8080"
+  SERVER_MODE: "release"
+  RABBITMQ_EXCHANGE: "sentinel.direct"
+  RABBITMQ_ROUTING_KEY: "execution_tasks"
+  RABBITMQ_QUEUE: "execution_tasks"
+  REDIS_DB: "0"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sentinel-api-secrets
+  namespace: sentinel
+type: Opaque
+stringData:
+  # Replace with actual values or use sealed-secrets / external-secrets
+  DATABASE_URL: "postgres://sentinel:changeme@sentinel-postgres:5432/sentinel_db?sslmode=disable"
+  RABBITMQ_URL: "amqp://sentinel:changeme@sentinel-rabbitmq:5672/"
+  REDIS_URL: "redis://sentinel-redis:6379/0"

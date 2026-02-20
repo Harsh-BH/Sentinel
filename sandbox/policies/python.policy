@@ -1,0 +1,116 @@
+/* =============================================================================
+ * Kafel seccomp-bpf policy for Python 3.12 execution
+ * Project Sentinel
+ * 
+ * This policy ALLOWLISTS specific syscalls needed by the Python interpreter.
+ * Everything not explicitly allowed is KILLED.
+ * =============================================================================
+ */
+
+POLICY python {
+  /* File I/O */
+  ALLOW {
+    read,
+    write,
+    openat,
+    close,
+    fstat,
+    newfstatat,
+    statx,
+    lseek,
+    lstat,
+    stat,
+    access,
+    faccessat,
+    faccessat2,
+    getcwd,
+    readlink,
+    readlinkat,
+    getdents64,
+    dup,
+    dup2,
+    dup3,
+    fcntl,
+    ioctl,
+    pipe,
+    pipe2
+  }
+
+  /* Memory management */
+  ALLOW {
+    brk,
+    mmap,
+    mprotect,
+    munmap,
+    mremap,
+    madvise
+  }
+
+  /* Process lifecycle */
+  ALLOW {
+    execve,       /* needed for initial Python interpreter launch */
+    exit_group,
+    exit,
+    clone,        /* needed for Python threading */
+    clone3,
+    wait4,
+    getpid,
+    getppid,
+    gettid,
+    getuid,
+    getgid,
+    geteuid,
+    getegid,
+    getgroups,
+    setgroups
+  }
+
+  /* Signals */
+  ALLOW {
+    rt_sigaction,
+    rt_sigprocmask,
+    rt_sigreturn,
+    sigaltstack
+  }
+
+  /* Thread synchronization */
+  ALLOW {
+    futex,
+    set_tid_address,
+    set_robust_list,
+    get_robust_list,
+    rseq
+  }
+
+  /* System information */
+  ALLOW {
+    uname,
+    sysinfo,
+    arch_prctl,
+    prlimit64,
+    getrandom
+  }
+
+  /* Time */
+  ALLOW {
+    clock_gettime,
+    clock_getres,
+    gettimeofday,
+    nanosleep,
+    clock_nanosleep
+  }
+
+  /* Misc */
+  ALLOW {
+    poll,
+    ppoll,
+    select,
+    pselect6,
+    epoll_create1,
+    epoll_ctl,
+    epoll_wait,
+    eventfd2
+  }
+}
+
+USE python DEFAULT KILL
