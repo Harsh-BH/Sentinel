@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	"github.com/Harsh-BH/Sentinel/api/internal/config"
@@ -49,6 +50,19 @@ func main() {
 	}
 	logger.Info("Connected to PostgreSQL")
 
+	// Connect to Redis
+	redisOpts, err := redis.ParseURL(cfg.Redis.URL)
+	if err != nil {
+		logger.Fatal("Failed to parse Redis URL", zap.Error(err))
+	}
+	rdb := redis.NewClient(redisOpts)
+	defer rdb.Close()
+
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		logger.Fatal("Failed to ping Redis", zap.Error(err))
+	}
+	logger.Info("Connected to Redis")
+
 	// Initialize RabbitMQ publisher
 	pub, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQ.URL, logger)
 	if err != nil {
@@ -65,7 +79,15 @@ func main() {
 	getJobUC := usecase.NewGetJobUsecase(jobRepo, logger)
 
 	// Initialize router
-	router := handler.NewRouter(submitUC, getJobUC, logger, cfg.Server.RateLimit)
+	router := handler.NewRouter(&handler.RouterDeps{
+		SubmitUC:        submitUC,
+		GetJobUC:        getJobUC,
+		Logger:          logger,
+		RateLimitPerMin: cfg.Server.RateLimit,
+		DBPool:          dbPool,
+		AmqpURI:         cfg.RabbitMQ.URL,
+		Redis:           rdb,
+	})
 
 	// Create HTTP server
 	srv := &http.Server{

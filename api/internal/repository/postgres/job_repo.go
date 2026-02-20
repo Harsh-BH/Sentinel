@@ -2,10 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Harsh-BH/Sentinel/api/internal/domain"
@@ -59,6 +61,9 @@ func (r *pgJobRepo) GetByID(ctx context.Context, id uuid.UUID) (*domain.Job, err
 		&job.CreatedAt, &job.UpdatedAt,
 	)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrJobNotFound
+		}
 		return nil, fmt.Errorf("postgres: get job by id: %w", err)
 	}
 	return job, nil
