@@ -26,3 +26,8 @@ type IdempotencyStore interface {
 	// ReleaseLock releases the processing lock with a TTL for eventual cleanup.
 	ReleaseLock(ctx context.Context, jobID uuid.UUID) error
 }
+
+// Executor defines the interface for running code in a sandbox.
+type Executor interface {
+	Execute(ctx context.Context, req *domain.ExecutionRequest) (*domain.ExecutionResult, error)
+}

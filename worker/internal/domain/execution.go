@@ -71,3 +71,18 @@ type ExecutionResult struct {
 	TimeUsedMs   int
 	MemoryUsedKB int
 }
+
+// AckFunc acknowledges that a message has been successfully processed.
+type AckFunc func() error
+
+// NackFunc negative-acknowledges a message. If requeue is true, the message is
+// returned to the queue; otherwise it is routed to the dead-letter exchange.
+type NackFunc func(requeue bool) error
+
+// JobMessage wraps a Job together with its RabbitMQ acknowledgement callbacks.
+// The worker pool must call Ack after successful execution or Nack on failure.
+type JobMessage struct {
+	Job  *Job
+	Ack  AckFunc
+	Nack NackFunc
+}
