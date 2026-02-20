@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -72,15 +73,14 @@ func main() {
 	// Initialize use case
 	executeUC := usecase.NewExecuteJobUsecase(jobRepo, idempotencyStore, sandboxExec, logger)
 
-	// Create buffered job channel
-	jobsChan := make(chan *domain.Job, cfg.Worker.PoolSize*2)
+	// Create buffered job channel (carries JobMessage with ACK callbacks).
+	jobsChan := make(chan *domain.JobMessage, cfg.Worker.PoolSize*2)
 
 	// Initialize AMQP consumer
 	consumer, err := amqpdelivery.NewConsumer(cfg.RabbitMQ.URL, jobsChan, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize AMQP consumer", zap.Error(err))
 	}
-	defer consumer.Close()
 	logger.Info("Connected to RabbitMQ")
 
 	// Start worker pool
@@ -95,27 +95,65 @@ func main() {
 		}
 	}()
 
-	// Start Prometheus metrics server
+	// Start HTTP server for Prometheus metrics + health check.
+	metricsSrv := &http.Server{
+		Addr:         fmt.Sprintf(":%d", cfg.Worker.MetricsPort),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		// Quick liveness: check DB and Redis are reachable.
+		pingCtx, pingCancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer pingCancel()
+		if err := dbPool.Ping(pingCtx); err != nil {
+			http.Error(w, "db unreachable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := redisClient.Ping(pingCtx).Err(); err != nil {
+			http.Error(w, "redis unreachable", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+	metricsSrv.Handler = mux
+
 	go func() {
-		metricsAddr := fmt.Sprintf(":%d", cfg.Worker.MetricsPort)
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", promhttp.Handler())
-		logger.Info("Metrics server listening", zap.String("addr", metricsAddr))
-		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+		logger.Info("Metrics/health server listening", zap.String("addr", metricsSrv.Addr))
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("Metrics server error", zap.Error(err))
 		}
 	}()
 
-	// Wait for shutdown signal
+	// ---- Graceful shutdown ----
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	logger.Info("Shutting down worker...")
+
+	// 1. Stop the AMQP consumer first so no new messages are fetched.
+	if err := consumer.Close(); err != nil {
+		logger.Error("Error closing AMQP consumer", zap.Error(err))
+	}
+
+	// 2. Cancel the context so workers finish their current job and exit.
 	cancel()
 
-	// Wait for workers to finish in-flight jobs
+	// 3. Wait for workers to drain in-flight jobs.
 	workerPool.Stop()
+
+	// 4. Close the job channel.
+	close(jobsChan)
+
+	// 5. Shut down the metrics server.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("Metrics server shutdown error", zap.Error(err))
+	}
 
 	logger.Info("Worker stopped")
 }
