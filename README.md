@@ -97,6 +97,8 @@ Sentinel/
 │   └── policies/               # Kafel seccomp policies
 ├── migrations/                 # PostgreSQL migrations
 ├── infra/k8s/                  # Kubernetes manifests
+├── infra/k8s/monitoring/       # Prometheus + Grafana stack
+├── infra/monitoring/           # Docker Compose observability configs
 ├── .github/workflows/          # CI pipeline
 ├── docker-compose.yml          # Local development stack
 ├── Makefile                    # Build & dev commands
@@ -241,6 +243,8 @@ make clean              # Clean build artifacts
 make docker-build       # Build all Docker images
 make docker-push        # Push images to GHCR
 make health             # Check health of running services
+make monitoring-up      # Start Prometheus + Grafana
+make monitoring-status  # Check monitoring endpoints
 ```
 
 ### Kubernetes (k3s) Deployment
@@ -296,6 +300,75 @@ Verify with: `kubectl get pods -n sentinel -w`
 - **Worker**: Receives health probes → talks to PG, RabbitMQ, Redis (no internet)
 - **PostgreSQL/Redis**: Accept only from API + Worker
 - **RabbitMQ**: Accept AMQP from API + Worker, inter-node clustering, Prometheus scrape
+- **Monitoring**: Prometheus can scrape all sentinel pods; Grafana reaches Prometheus; postgres-exporter reaches PG
+
+### Observability (Prometheus + Grafana)
+
+Sentinel ships a full observability stack for both local development and Kubernetes.
+
+#### Local (Docker Compose)
+
+```bash
+make monitoring-up       # Start Prometheus + Grafana
+make monitoring-status   # Check endpoints
+make monitoring-down     # Stop monitoring stack
+```
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Prometheus | [http://localhost:9091](http://localhost:9091) | — |
+| Grafana | [http://localhost:3001](http://localhost:3001) | admin / sentinel |
+
+#### Kubernetes
+
+```bash
+make k8s-monitoring-apply      # Deploy monitoring stack
+make k8s-monitoring-status     # Check pods/services
+make k8s-monitoring-portforward  # Port-forward Grafana + Prometheus
+make k8s-monitoring-delete     # Teardown monitoring
+```
+
+#### Metrics Exposed
+
+| Component | Port | Path | Key Metrics |
+|-----------|------|------|-------------|
+| **API** | 8080 | `/metrics` | Default Go/Gin metrics, HTTP request counts |
+| **Worker** | 9090 | `/metrics` | `sentinel_executions_total`, `sentinel_execution_duration_seconds`, `sentinel_workers_active`, `sentinel_sandbox_failures_total` |
+| **RabbitMQ** | 15692 | `/metrics` | Queue depth, message rates, consumer counts |
+| **PostgreSQL** | 9187 | `/metrics` | Connection counts, database size, query stats (via postgres-exporter) |
+
+#### Grafana Dashboards
+
+| Dashboard | Description |
+|-----------|-------------|
+| **Sentinel Overview** | Execution rates, error rates, active workers, p50/p90/p99 latencies, sandbox failures |
+| **Worker Health** | Per-pod execution rates, duration heatmap, error rates, CPU/memory usage |
+| **Infrastructure** | PostgreSQL connections/size, RabbitMQ queue depth/throughput, Redis clients/memory, node CPU/memory |
+
+#### Alerting Rules
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| `SentinelQueueBacklog` | Queue > 1000 messages for 5m | ⚠️ Warning |
+| `SentinelWorkerDown` | Active workers < 1 for 3m | 🔴 Critical |
+| `SentinelHighErrorRate` | Error rate > 10% for 5m | ⚠️ Warning |
+| `SentinelSandboxFailures` | > 50 failures in 5m | 🔴 Critical |
+
+#### Monitoring Manifest Structure (`infra/k8s/monitoring/`)
+
+| File | Resources |
+|------|-----------|
+| `namespace.yaml` | Monitoring namespace |
+| `prometheus-rbac.yaml` | ServiceAccount, ClusterRole, ClusterRoleBinding |
+| `prometheus-config.yaml` | Prometheus ConfigMap (scrape configs for API, Worker, RabbitMQ, postgres-exporter, nodes) |
+| `alerting-rules.yaml` | 4 alerting rules (queue backlog, worker down, error rate, sandbox failures) |
+| `prometheus-deployment.yaml` | PVC (10Gi), Deployment, Service |
+| `grafana-config.yaml` | Datasource + dashboard provider ConfigMaps |
+| `grafana-dashboards.yaml` | 3 dashboard JSON ConfigMaps (Overview, Worker Health, Infrastructure) |
+| `grafana-deployment.yaml` | PVC (2Gi), Deployment, Service |
+| `postgres-exporter.yaml` | Deployment, Service (connects to sentinel-postgres) |
+| `network-policies.yaml` | Prometheus scrape, Grafana→Prometheus, postgres-exporter→PG |
+| `kustomization.yaml` | Monitoring Kustomize base |
 
 ### CI/CD
 
@@ -325,7 +398,7 @@ See [MASTER_PLAN.md](./MASTER_PLAN.md) for the full 10-phase development plan:
 - ✅ **Phase 5**: Dockerization & Docker Compose integration
 - ✅ **Phase 6**: CI/CD pipeline (GitHub Actions, GHCR, integration tests)
 - ✅ **Phase 7**: Kubernetes deployment (k3s + KEDA + network policies)
-- 🔲 **Phase 8**: Performance & hardening
+- ✅ **Phase 8**: Observability (Prometheus + Grafana + alerting)
 - 🔲 **Phase 9**: Documentation & launch
 
 ---

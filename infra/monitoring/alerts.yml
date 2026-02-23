@@ -1,0 +1,42 @@
+# =============================================================================
+# Project Sentinel — Prometheus Alerting Rules (Docker Compose)
+# =============================================================================
+groups:
+  - name: sentinel.rules
+    rules:
+      - alert: SentinelQueueBacklog
+        expr: rabbitmq_queue_messages{queue="code_execution"} > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue backlog exceeds 1000 messages"
+
+      - alert: SentinelWorkerDown
+        expr: sum(sentinel_workers_active) < 1
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No active Sentinel workers"
+
+      - alert: SentinelHighErrorRate
+        expr: |
+          (
+            sum(rate(sentinel_executions_total{status="error"}[5m]))
+            /
+            sum(rate(sentinel_executions_total[5m]))
+          ) > 0.10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Execution error rate exceeds 10%"
+
+      - alert: SentinelSandboxFailures
+        expr: increase(sentinel_sandbox_failures_total[5m]) > 50
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Sandbox failure spike detected"

@@ -11,7 +11,8 @@
         fmt deps deps-frontend clean \
         docker-build docker-build-api docker-build-worker docker-build-frontend \
         docker-push \
-        k8s-apply k8s-delete k8s-status k8s-logs k8s-setup k8s-teardown
+        k8s-apply k8s-delete k8s-status k8s-logs k8s-setup k8s-teardown \
+        monitoring-up monitoring-down monitoring-status
 
 # Default target
 help: ## Show this help
@@ -147,9 +148,11 @@ deps-frontend: ## Install frontend dependencies
 # ---------- Health Check ----------
 
 health: ## Check health of running services
-	@echo "API:    $$(curl -sf http://localhost:8080/api/v1/health && echo ' ✅' || echo ' ❌')"
-	@echo "Worker: $$(curl -sf http://localhost:9090/healthz && echo ' ✅' || echo ' ❌')"
-	@echo "Frontend: $$(curl -sf http://localhost:3000/nginx-health && echo ' ✅' || echo ' ❌')"
+	@echo "API:        $$(curl -sf http://localhost:8080/api/v1/health && echo ' ✅' || echo ' ❌')"
+	@echo "Worker:     $$(curl -sf http://localhost:9090/healthz && echo ' ✅' || echo ' ❌')"
+	@echo "Frontend:   $$(curl -sf http://localhost:3000/nginx-health && echo ' ✅' || echo ' ❌')"
+	@echo "Prometheus: $$(curl -sf http://localhost:9091/-/healthy && echo ' ✅' || echo ' ❌')"
+	@echo "Grafana:    $$(curl -sf http://localhost:3001/api/health && echo ' ✅' || echo ' ❌')"
 
 # ---------- Kubernetes (k3s) ----------
 
@@ -188,6 +191,43 @@ k8s-logs: ## Tail logs for all Sentinel pods
 
 k8s-teardown: ## Full teardown of Sentinel from k3s (requires sudo)
 	sudo ./scripts/setup-k3s.sh --teardown
+
+# ---------- Monitoring / Observability ----------
+
+monitoring-up: ## Start Prometheus + Grafana (docker-compose)
+	docker compose up -d prometheus grafana
+	@echo ""
+	@echo "Prometheus: http://localhost:9091"
+	@echo "Grafana:    http://localhost:3001 (admin / sentinel)"
+
+monitoring-down: ## Stop Prometheus + Grafana
+	docker compose rm -sf prometheus grafana
+
+monitoring-status: ## Check monitoring endpoints
+	@echo "Prometheus: $$(curl -sf http://localhost:9091/-/healthy && echo ' ✅' || echo ' ❌')"
+	@echo "Grafana:    $$(curl -sf http://localhost:3001/api/health && echo ' ✅' || echo ' ❌')"
+
+k8s-monitoring-apply: ## Apply monitoring stack to k3s
+	kubectl apply -k infra/k8s/monitoring/
+
+k8s-monitoring-delete: ## Delete monitoring stack from k3s
+	kubectl delete -k infra/k8s/monitoring/ --ignore-not-found
+
+k8s-monitoring-status: ## Show monitoring stack status
+	@echo "── Monitoring Pods ──"
+	@kubectl get pods -n monitoring -o wide
+	@echo ""
+	@echo "── Monitoring Services ──"
+	@kubectl get svc -n monitoring
+	@echo ""
+	@echo "── Monitoring PVCs ──"
+	@kubectl get pvc -n monitoring
+
+k8s-monitoring-portforward: ## Port-forward Grafana + Prometheus
+	@echo "Prometheus → localhost:9091  |  Grafana → localhost:3001"
+	@echo "Press Ctrl+C to stop"
+	@kubectl port-forward -n monitoring svc/prometheus 9091:9090 &
+	@kubectl port-forward -n monitoring svc/grafana 3001:3000
 
 # ---------- Cleanup ----------
 

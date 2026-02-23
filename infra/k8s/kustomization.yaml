@@ -40,3 +40,7 @@ resources:
 
   # 7. Network Policies
   - network-policies.yaml
+
+# NOTE: Monitoring stack (infra/k8s/monitoring/) uses its own kustomization
+# with a separate namespace. Apply separately:
+#   kubectl apply -k infra/k8s/monitoring/

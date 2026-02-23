@@ -1,0 +1,95 @@
+# =============================================================================
+# Project Sentinel — Monitoring Network Policies
+# =============================================================================
+
+# Allow Prometheus to scrape pods in sentinel namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 8080     # API metrics
+          protocol: TCP
+        - port: 9090     # Worker metrics
+          protocol: TCP
+        - port: 15692    # RabbitMQ metrics
+          protocol: TCP
+---
+# Allow Grafana to reach Prometheus
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-grafana-to-prometheus
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+      ports:
+        - port: 9090
+          protocol: TCP
+---
+# Allow external access to Grafana (via ingress/port-forward)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-grafana-ingress
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 3000
+          protocol: TCP
+---
+# Allow postgres-exporter to reach PostgreSQL in sentinel namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-exporter
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres-exporter
+      ports:
+        - port: 5432
+          protocol: TCP

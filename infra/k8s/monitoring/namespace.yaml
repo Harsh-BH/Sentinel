@@ -1,0 +1,10 @@
+# =============================================================================
+# Project Sentinel — Monitoring Namespace
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/part-of: sentinel
+    kubernetes.io/metadata.name: monitoring
