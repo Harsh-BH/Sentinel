@@ -1,0 +1,219 @@
+# =============================================================================
+# Project Sentinel — Kubernetes ConfigMaps
+# =============================================================================
+
+# ── API Configuration ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-api-config
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+    app.kubernetes.io/component: api
+data:
+  SERVER_PORT: "8080"
+  SERVER_MODE: "release"
+  RABBITMQ_EXCHANGE: "sentinel.direct"
+  RABBITMQ_ROUTING_KEY: "execution_tasks"
+  RABBITMQ_QUEUE: "execution_tasks"
+  REDIS_DB: "0"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+---
+# ── Worker Configuration ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-worker-config
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+    app.kubernetes.io/component: worker
+data:
+  WORKER_POOL_SIZE: "4"
+  NSJAIL_PATH: "/usr/bin/nsjail"
+  NSJAIL_PYTHON_CONFIG: "/etc/nsjail/python.cfg"
+  NSJAIL_CPP_CONFIG: "/etc/nsjail/cpp.cfg"
+  EXECUTION_TIMEOUT: "10s"
+  EXECUTION_MAX_OUTPUT: "65536"
+  METRICS_PORT: "9090"
+  RABBITMQ_QUEUE: "execution_tasks"
+  RABBITMQ_PREFETCH: "1"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+---
+# ── nsjail Configuration (mounted as volume into worker pods) ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-nsjail-config
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+    app.kubernetes.io/component: worker
+data:
+  python.cfg: |
+    name: "sentinel-python"
+    description: "Sandbox for executing untrusted Python 3.12 code"
+    mode: ONCE
+    hostname: "sandbox"
+    time_limit: 5
+    log_level: WARNING
+
+    clone_newnet: true
+    clone_newuser: true
+    clone_newns: true
+    clone_newpid: true
+    clone_newipc: true
+    clone_newuts: true
+    clone_newcgroup: true
+
+    cgroup_mem_max: 268435456
+    cgroup_pids_max: 64
+    cgroup_cpu_ms_per_sec: 1000
+
+    rlimit_as_type: HARD
+    rlimit_cpu_type: HARD
+    rlimit_fsize: 64
+    rlimit_nofile: 64
+
+    uidmap { inside_id: "1000" outside_id: "" count: 1 }
+    gidmap { inside_id: "1000" outside_id: "" count: 1 }
+
+    mount { src: "/usr"  dst: "/usr"  is_bind: true }
+    mount { src: "/lib"  dst: "/lib"  is_bind: true }
+    mount { src: "/lib64" dst: "/lib64" is_bind: true is_optional: true }
+    mount { dst: "/tmp"  fstype: "tmpfs" rw: true }
+    mount { dst: "/dev"  fstype: "tmpfs" }
+    mount { src: "/dev/null"  dst: "/dev/null"  is_bind: true rw: true }
+    mount { src: "/dev/urandom" dst: "/dev/urandom" is_bind: true }
+    mount { dst: "/proc" fstype: "proc" }
+    mount { src: "/etc/alternatives" dst: "/etc/alternatives" is_bind: true is_optional: true }
+
+  cpp.cfg: |
+    name: "sentinel-cpp"
+    description: "Sandbox for compiling and executing untrusted C++17 code"
+    mode: ONCE
+    hostname: "sandbox"
+    time_limit: 10
+    log_level: WARNING
+
+    clone_newnet: true
+    clone_newuser: true
+    clone_newns: true
+    clone_newpid: true
+    clone_newipc: true
+    clone_newuts: true
+    clone_newcgroup: true
+
+    cgroup_mem_max: 536870912
+    cgroup_pids_max: 128
+    cgroup_cpu_ms_per_sec: 1000
+
+    rlimit_as_type: HARD
+    rlimit_cpu_type: HARD
+    rlimit_fsize: 128
+    rlimit_nofile: 128
+
+    uidmap { inside_id: "1000" outside_id: "" count: 1 }
+    gidmap { inside_id: "1000" outside_id: "" count: 1 }
+
+    mount { src: "/usr"  dst: "/usr"  is_bind: true }
+    mount { src: "/lib"  dst: "/lib"  is_bind: true }
+    mount { src: "/lib64" dst: "/lib64" is_bind: true is_optional: true }
+    mount { dst: "/tmp"  fstype: "tmpfs" rw: true }
+    mount { dst: "/dev"  fstype: "tmpfs" }
+    mount { src: "/dev/null"  dst: "/dev/null"  is_bind: true rw: true }
+    mount { src: "/dev/urandom" dst: "/dev/urandom" is_bind: true }
+    mount { dst: "/proc" fstype: "proc" }
+    mount { src: "/etc/alternatives" dst: "/etc/alternatives" is_bind: true is_optional: true }
+---
+# ── RabbitMQ Configuration ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-rabbitmq-config
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+    app.kubernetes.io/component: messaging
+data:
+  rabbitmq.conf: |
+    ## Prometheus metrics
+    prometheus.return_per_object_metrics = true
+    ## Enable prometheus plugin
+    ## (enabled via enabled_plugins file in container)
+
+    ## Memory watermark
+    vm_memory_high_watermark.relative = 0.7
+    ## Disk free limit
+    disk_free_limit.relative = 1.5
+
+    ## Queue type default (quorum for durability)
+    default_queue_type = quorum
+
+    ## Consumer timeout: 30 minutes
+    consumer_timeout = 1800000
+  enabled_plugins: |
+    [rabbitmq_management,rabbitmq_prometheus].
+---
+# ── PostgreSQL Init Scripts ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-postgres-init
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+    app.kubernetes.io/component: database
+data:
+  001_initial_schema.sql: |
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+    CREATE TYPE execution_status AS ENUM (
+        'QUEUED', 'COMPILING', 'RUNNING', 'SUCCESS',
+        'COMPILATION_ERROR', 'RUNTIME_ERROR', 'TIMEOUT',
+        'MEMORY_LIMIT_EXCEEDED', 'INTERNAL_ERROR'
+    );
+
+    CREATE TYPE language AS ENUM ('python', 'cpp');
+
+    CREATE TABLE execution_jobs (
+        job_id          UUID PRIMARY KEY,
+        language        language NOT NULL,
+        source_code     TEXT NOT NULL,
+        stdin           TEXT DEFAULT '',
+        stdout          TEXT DEFAULT '',
+        stderr          TEXT DEFAULT '',
+        status          execution_status NOT NULL DEFAULT 'QUEUED',
+        exit_code       INT,
+        time_used_ms    INT,
+        memory_used_kb  INT,
+        time_limit_ms   INT NOT NULL DEFAULT 5000,
+        memory_limit_kb INT NOT NULL DEFAULT 262144,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    ) PARTITION BY RANGE (created_at);
+
+    CREATE TABLE execution_jobs_2026_q1 PARTITION OF execution_jobs
+        FOR VALUES FROM ('2026-01-01') TO ('2026-04-01');
+    CREATE TABLE execution_jobs_2026_q2 PARTITION OF execution_jobs
+        FOR VALUES FROM ('2026-04-01') TO ('2026-07-01');
+    CREATE TABLE execution_jobs_2026_q3 PARTITION OF execution_jobs
+        FOR VALUES FROM ('2026-07-01') TO ('2026-10-01');
+    CREATE TABLE execution_jobs_2026_q4 PARTITION OF execution_jobs
+        FOR VALUES FROM ('2026-10-01') TO ('2027-01-01');
+
+    CREATE INDEX idx_active_jobs ON execution_jobs(job_id)
+        WHERE status IN ('QUEUED', 'COMPILING', 'RUNNING');
+    CREATE INDEX idx_jobs_status ON execution_jobs(status, created_at);
+
+    CREATE OR REPLACE FUNCTION update_updated_at()
+    RETURNS TRIGGER AS $$
+    BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+    $$ LANGUAGE plpgsql;
+
+    CREATE TRIGGER trg_execution_jobs_updated_at
+        BEFORE UPDATE ON execution_jobs
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at();

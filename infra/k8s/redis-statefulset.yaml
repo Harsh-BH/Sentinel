@@ -1,3 +1,8 @@
+# =============================================================================
+# Project Sentinel — Redis 7 StatefulSet
+# =============================================================================
+# Single instance with AOF persistence, memory limits, and LRU eviction
+# =============================================================================
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -8,7 +13,7 @@ metadata:
     app.kubernetes.io/component: cache
     app.kubernetes.io/part-of: sentinel
 spec:
-  serviceName: sentinel-redis
+  serviceName: sentinel-redis-headless
   replicas: 1
   selector:
     matchLabels:
@@ -18,7 +23,10 @@ spec:
       labels:
         app.kubernetes.io/name: sentinel-redis
         app.kubernetes.io/component: cache
+      annotations:
+        prometheus.io/scrape: "false"
     spec:
+      terminationGracePeriodSeconds: 30
       containers:
         - name: redis
           image: redis:7-alpine
@@ -32,6 +40,13 @@ spec:
             - "yes"
             - --appendfsync
             - everysec
+            - --save
+            - "60"
+            - "1000"
+            - --tcp-backlog
+            - "511"
+            - --timeout
+            - "300"
           ports:
             - name: redis
               containerPort: 6379
@@ -75,6 +90,26 @@ spec:
             storage: 1Gi
         storageClassName: local-path
 ---
+# Headless Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel-redis-headless
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-redis
+    app.kubernetes.io/component: cache
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 6379
+      targetPort: redis
+      name: redis
+  selector:
+    app.kubernetes.io/name: sentinel-redis
+---
+# Client-facing Service
 apiVersion: v1
 kind: Service
 metadata:

@@ -1,0 +1,381 @@
+# =============================================================================
+# Project Sentinel — Kubernetes Network Policies
+# =============================================================================
+# Principle: deny-all by default, then allow only required traffic flows.
+# Worker pods CANNOT access PostgreSQL or RabbitMQ cluster IPs directly;
+# they must go through Kubernetes service DNS.
+# =============================================================================
+
+# ── Default deny-all ingress+egress in sentinel namespace ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# ── Allow DNS resolution for all pods ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# ── API pod policies ──
+# API can: receive ingress from nginx-ingress, talk to PG, RabbitMQ, Redis
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-ingress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-api
+  policyTypes:
+    - Ingress
+  ingress:
+    # From nginx-ingress controller (ingress-nginx namespace)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+    # From Prometheus scraping /metrics
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-egress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-api
+  policyTypes:
+    - Egress
+  egress:
+    # To PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # To RabbitMQ (AMQP)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5672
+    # To Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-redis
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+# ── Worker pod policies ──
+# Workers can: talk to PG, RabbitMQ, Redis; NO direct internet; NO cross-worker
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-ingress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-worker
+  policyTypes:
+    - Ingress
+  ingress:
+    # Prometheus scraping /metrics
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+    # Kubelet health probes (from node)
+    - ports:
+        - protocol: TCP
+          port: 9090
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-egress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-worker
+  policyTypes:
+    - Egress
+  egress:
+    # To PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # To RabbitMQ (AMQP)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5672
+    # To Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-redis
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+# ── PostgreSQL pod policies ──
+# Accepts connections from API and Worker only
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-worker
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-egress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-postgres
+  policyTypes:
+    - Egress
+  egress: []  # Postgres needs no outbound (except DNS, allowed above)
+---
+# ── RabbitMQ pod policies ──
+# Accepts AMQP from API + Worker, management from ingress, inter-node clustering
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rabbitmq-ingress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-rabbitmq
+  policyTypes:
+    - Ingress
+  ingress:
+    # AMQP from API + Worker
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-worker
+      ports:
+        - protocol: TCP
+          port: 5672
+    # Inter-node clustering (epmd + distribution)
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-rabbitmq
+      ports:
+        - protocol: TCP
+          port: 4369
+        - protocol: TCP
+          port: 25672
+    # Prometheus metrics
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 15692
+    # Management UI (from ingress)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 15672
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rabbitmq-egress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-rabbitmq
+  policyTypes:
+    - Egress
+  egress:
+    # Inter-node clustering
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-rabbitmq
+      ports:
+        - protocol: TCP
+          port: 4369
+        - protocol: TCP
+          port: 25672
+---
+# ── Redis pod policies ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-ingress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sentinel-worker
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-egress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-redis
+  policyTypes:
+    - Egress
+  egress: []  # Redis needs no outbound
+---
+# ── Frontend pod policies ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-ingress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-egress
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-frontend
+  policyTypes:
+    - Egress
+  egress: []  # Frontend (nginx) serves static files, no outbound needed

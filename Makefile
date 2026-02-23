@@ -10,11 +10,12 @@
         lint lint-api lint-worker lint-frontend \
         fmt deps deps-frontend clean \
         docker-build docker-build-api docker-build-worker docker-build-frontend \
-        docker-push
+        docker-push \
+        k8s-apply k8s-delete k8s-status k8s-logs k8s-setup k8s-teardown
 
 # Default target
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 # ---------- Build ----------
@@ -149,6 +150,44 @@ health: ## Check health of running services
 	@echo "API:    $$(curl -sf http://localhost:8080/api/v1/health && echo ' ✅' || echo ' ❌')"
 	@echo "Worker: $$(curl -sf http://localhost:9090/healthz && echo ' ✅' || echo ' ❌')"
 	@echo "Frontend: $$(curl -sf http://localhost:3000/nginx-health && echo ' ✅' || echo ' ❌')"
+
+# ---------- Kubernetes (k3s) ----------
+
+NAMESPACE ?= sentinel
+
+k8s-setup: ## Full k3s cluster setup (requires sudo)
+	sudo ./scripts/setup-k3s.sh
+
+k8s-apply: ## Apply all K8s manifests via Kustomize
+	kubectl apply -k infra/k8s/
+
+k8s-delete: ## Delete all K8s resources
+	kubectl delete -k infra/k8s/ --ignore-not-found
+
+k8s-status: ## Show status of all Sentinel resources in k8s
+	@echo "── Pods ──"
+	@kubectl get pods -n $(NAMESPACE) -o wide
+	@echo ""
+	@echo "── Services ──"
+	@kubectl get svc -n $(NAMESPACE)
+	@echo ""
+	@echo "── Deployments / StatefulSets ──"
+	@kubectl get deploy,sts -n $(NAMESPACE)
+	@echo ""
+	@echo "── HPA / ScaledObjects ──"
+	@kubectl get hpa,scaledobject -n $(NAMESPACE) 2>/dev/null || true
+	@echo ""
+	@echo "── Ingress ──"
+	@kubectl get ingress -n $(NAMESPACE)
+	@echo ""
+	@echo "── PVCs ──"
+	@kubectl get pvc -n $(NAMESPACE)
+
+k8s-logs: ## Tail logs for all Sentinel pods
+	kubectl logs -n $(NAMESPACE) -l app.kubernetes.io/part-of=sentinel -f --max-log-requests=10
+
+k8s-teardown: ## Full teardown of Sentinel from k3s (requires sudo)
+	sudo ./scripts/setup-k3s.sh --teardown
 
 # ---------- Cleanup ----------
 

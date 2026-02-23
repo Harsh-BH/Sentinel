@@ -1,3 +1,8 @@
+# =============================================================================
+# Project Sentinel — PostgreSQL 16 StatefulSet
+# =============================================================================
+# Primary instance with persistent storage, init scripts, and health probes
+# =============================================================================
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -8,8 +13,11 @@ metadata:
     app.kubernetes.io/component: database
     app.kubernetes.io/part-of: sentinel
 spec:
-  serviceName: sentinel-postgres
+  serviceName: sentinel-postgres-headless
   replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
   selector:
     matchLabels:
       app.kubernetes.io/name: sentinel-postgres
@@ -18,7 +26,10 @@ spec:
       labels:
         app.kubernetes.io/name: sentinel-postgres
         app.kubernetes.io/component: database
+      annotations:
+        prometheus.io/scrape: "false"
     spec:
+      terminationGracePeriodSeconds: 60
       containers:
         - name: postgres
           image: postgres:16-alpine
@@ -41,9 +52,31 @@ spec:
               value: sentinel_db
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+            # Connection tuning
+            - name: POSTGRES_INITDB_ARGS
+              value: "--encoding=UTF8 --locale=C"
+          args:
+            - -c
+            - max_connections=200
+            - -c
+            - shared_buffers=256MB
+            - -c
+            - effective_cache_size=512MB
+            - -c
+            - work_mem=4MB
+            - -c
+            - maintenance_work_mem=64MB
+            - -c
+            - wal_level=replica
+            - -c
+            - max_wal_senders=3
+            - -c
+            - log_statement=ddl
+            - -c
+            - log_min_duration_statement=1000
           resources:
             requests:
-              cpu: 100m
+              cpu: 200m
               memory: 256Mi
             limits:
               cpu: "1"
@@ -91,8 +124,28 @@ spec:
         resources:
           requests:
             storage: 10Gi
-        storageClassName: local-path  # k3s default storage class
+        storageClassName: local-path
 ---
+# Headless Service (StatefulSet DNS)
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel-postgres-headless
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-postgres
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+  selector:
+    app.kubernetes.io/name: sentinel-postgres
+---
+# Client-facing Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -111,12 +164,17 @@ spec:
   selector:
     app.kubernetes.io/name: sentinel-postgres
 ---
-apiVersion: v1
-kind: Secret
+# PodDisruptionBudget — do not disrupt the primary
+apiVersion: policy/v1
+kind: PodDisruptionBudget
 metadata:
-  name: sentinel-postgres-secrets
+  name: sentinel-postgres-pdb
   namespace: sentinel
-type: Opaque
-stringData:
-  POSTGRES_USER: sentinel
-  POSTGRES_PASSWORD: changeme  # Replace with sealed-secret in production
+  labels:
+    app.kubernetes.io/name: sentinel-postgres
+    app.kubernetes.io/component: database
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-postgres
