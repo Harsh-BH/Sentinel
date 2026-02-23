@@ -1,0 +1,84 @@
+# =============================================================================
+# Project Sentinel — Prometheus Alerting Rules
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alerting-rules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: sentinel
+data:
+  sentinel-alerts.yml: |
+    groups:
+      - name: sentinel.rules
+        rules:
+          # ── Alert 1: Queue Backlog ──
+          # Fires when RabbitMQ queue depth exceeds 1000 for 5 minutes
+          - alert: SentinelQueueBacklog
+            expr: rabbitmq_queue_messages{queue="code_execution"} > 1000
+            for: 5m
+            labels:
+              severity: warning
+              team: sentinel
+            annotations:
+              summary: "Queue backlog exceeds 1000 messages"
+              description: >-
+                The code_execution queue has {{ $value }} pending messages
+                for more than 5 minutes. Consider scaling up workers or
+                investigating consumer health.
+              runbook_url: "https://github.com/harsh-bh/Sentinel/wiki/runbooks#queue-backlog"
+
+          # ── Alert 2: Worker Down ──
+          # Fires when the number of active workers drops below minimum
+          - alert: SentinelWorkerDown
+            expr: sum(sentinel_workers_active) < 1
+            for: 3m
+            labels:
+              severity: critical
+              team: sentinel
+            annotations:
+              summary: "No active Sentinel workers"
+              description: >-
+                Active worker count is {{ $value }} (expected ≥ 1) for
+                more than 3 minutes. Execution requests will not be
+                processed.
+              runbook_url: "https://github.com/harsh-bh/Sentinel/wiki/runbooks#worker-down"
+
+          # ── Alert 3: High Error Rate ──
+          # Fires when execution error rate exceeds 10% over 5 minutes
+          - alert: SentinelHighErrorRate
+            expr: |
+              (
+                sum(rate(sentinel_executions_total{status="error"}[5m]))
+                /
+                sum(rate(sentinel_executions_total[5m]))
+              ) > 0.10
+            for: 5m
+            labels:
+              severity: warning
+              team: sentinel
+            annotations:
+              summary: "Execution error rate exceeds 10%"
+              description: >-
+                The overall execution error rate is {{ $value | humanizePercentage }}
+                over the last 5 minutes. Investigate recent code submissions or
+                sandbox health.
+              runbook_url: "https://github.com/harsh-bh/Sentinel/wiki/runbooks#high-error-rate"
+
+          # ── Alert 4: Sandbox Failures ──
+          # Fires when sandbox failures exceed 50 in 5 minutes
+          - alert: SentinelSandboxFailures
+            expr: increase(sentinel_sandbox_failures_total[5m]) > 50
+            for: 0m
+            labels:
+              severity: critical
+              team: sentinel
+            annotations:
+              summary: "Sandbox failure spike detected"
+              description: >-
+                {{ $value }} sandbox failures occurred in the last 5 minutes.
+                This likely indicates Docker daemon issues, resource exhaustion,
+                or image pull failures.
+              runbook_url: "https://github.com/harsh-bh/Sentinel/wiki/runbooks#sandbox-failures"
