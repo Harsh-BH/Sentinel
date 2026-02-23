@@ -54,8 +54,8 @@
 | **Database** | PostgreSQL 16 (partitioned tables, UUIDv7) |
 | **Cache** | Redis 7 (idempotency locks, rate limiting) |
 | **Observability** | Prometheus + Grafana |
-| **Infrastructure** | Docker Compose (dev), k3s + KEDA (prod) |
-| **CI/CD** | GitHub Actions |
+| **Infrastructure** | Docker Compose (dev), k3s + KEDA + cert-manager (prod) |
+| **CI/CD** | GitHub Actions, GHCR |
 
 ---
 
@@ -243,6 +243,60 @@ make docker-push        # Push images to GHCR
 make health             # Check health of running services
 ```
 
+### Kubernetes (k3s) Deployment
+
+```bash
+# Full cluster setup (installs k3s, KEDA, cert-manager, nginx-ingress)
+sudo make k8s-setup
+
+# Or apply manifests only (if cluster already exists)
+make k8s-apply
+
+# Check status
+make k8s-status
+
+# Tail logs
+make k8s-logs
+
+# Teardown
+sudo make k8s-teardown
+```
+
+#### Manifest Structure (`infra/k8s/`)
+
+| File | Resources |
+|------|-----------|
+| `namespace.yaml` | Namespace, ResourceQuota, LimitRange |
+| `secrets.yaml` | PostgreSQL, RabbitMQ, Redis, API, Worker secrets |
+| `configmaps.yaml` | API config, Worker config, nsjail configs, RabbitMQ config, PG init scripts |
+| `postgres-statefulset.yaml` | StatefulSet (1 replica), headless + client Service, PDB |
+| `rabbitmq-statefulset.yaml` | StatefulSet (3 replicas, quorum queues), headless + client Service, PDB |
+| `redis-statefulset.yaml` | StatefulSet (1 replica, AOF), headless + client Service |
+| `api-deployment.yaml` | Deployment (3 replicas), Service, ServiceAccount, PDB |
+| `worker-deployment.yaml` | Deployment (KEDA-managed, 2–50), Service, ServiceAccount, PDB |
+| `ingress.yaml` | ClusterIssuer (Let's Encrypt), Ingress (TLS, WebSocket, CORS), Frontend Deployment + Service + PDB |
+| `keda-scaledobject.yaml` | ScaledObject (queue-based), TriggerAuthentication, API HPA (CPU) |
+| `network-policies.yaml` | Default deny-all, per-component ingress/egress rules |
+| `kustomization.yaml` | Kustomize base (ordered resource application) |
+
+#### Worker Auto-Scaling (KEDA)
+
+Workers scale based on RabbitMQ `execution_tasks` queue depth:
+- **Trigger**: Queue length > 15 messages per worker
+- **Min replicas**: 2 | **Max replicas**: 50
+- **Scale-up**: +5 pods or +100% every 30s (whichever is larger)
+- **Scale-down**: -2 pods every 60s (120s stabilization window)
+
+Verify with: `kubectl get pods -n sentinel -w`
+
+#### Network Policies
+
+- **Default**: Deny-all ingress + egress in `sentinel` namespace
+- **API**: Receives from nginx-ingress → talks to PG, RabbitMQ, Redis
+- **Worker**: Receives health probes → talks to PG, RabbitMQ, Redis (no internet)
+- **PostgreSQL/Redis**: Accept only from API + Worker
+- **RabbitMQ**: Accept AMQP from API + Worker, inter-node clustering, Prometheus scrape
+
 ### CI/CD
 
 The CI pipeline (`.github/workflows/ci.yml`) runs automatically on every push and PR to `main`:
@@ -270,7 +324,7 @@ See [MASTER_PLAN.md](./MASTER_PLAN.md) for the full 10-phase development plan:
 - ✅ **Phase 4**: Frontend (Monaco editor, real-time results, history)
 - ✅ **Phase 5**: Dockerization & Docker Compose integration
 - ✅ **Phase 6**: CI/CD pipeline (GitHub Actions, GHCR, integration tests)
-- 🔲 **Phase 7**: Kubernetes deployment (k3s + KEDA)
+- ✅ **Phase 7**: Kubernetes deployment (k3s + KEDA + network policies)
 - 🔲 **Phase 8**: Performance & hardening
 - 🔲 **Phase 9**: Documentation & launch
 

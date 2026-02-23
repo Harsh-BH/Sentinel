@@ -6,6 +6,8 @@
 *.dylib
 bin/
 dist/
+api/server
+worker/worker
 
 # Go
 api/tmp/

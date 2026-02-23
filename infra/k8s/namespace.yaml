@@ -1,3 +1,6 @@
+# =============================================================================
+# Project Sentinel — Kubernetes Namespace + Resource Governance
+# =============================================================================
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -5,3 +8,46 @@ metadata:
   labels:
     app.kubernetes.io/name: sentinel
     app.kubernetes.io/part-of: sentinel
+    kubernetes.io/metadata.name: sentinel
+---
+# ResourceQuota prevents runaway resource consumption in the namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: sentinel-quota
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: 20Gi
+    limits.cpu: "40"
+    limits.memory: 40Gi
+    pods: "100"
+    services: "20"
+    persistentvolumeclaims: "10"
+---
+# LimitRange provides sane defaults for containers without explicit limits
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: sentinel-limits
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 256Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      max:
+        cpu: "4"
+        memory: 4Gi
+      min:
+        cpu: 50m
+        memory: 32Mi

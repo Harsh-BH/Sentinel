@@ -1,3 +1,47 @@
+# =============================================================================
+# Project Sentinel — Nginx Ingress + TLS + Frontend Deployment
+# =============================================================================
+# cert-manager ClusterIssuer for Let's Encrypt, WebSocket support,
+# rate limiting, CORS, and frontend serving
+# =============================================================================
+
+# ── cert-manager ClusterIssuer (Let's Encrypt) ──
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@sentinel.dev           # 🔒 Replace with your email
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+---
+# Staging issuer for testing (avoids rate limits)
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+  labels:
+    app.kubernetes.io/part-of: sentinel
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: admin@sentinel.dev
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+---
+# ── Ingress Resource ──
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -7,11 +51,16 @@ metadata:
     app.kubernetes.io/name: sentinel-ingress
     app.kubernetes.io/part-of: sentinel
   annotations:
-    # nginx ingress controller annotations (k3s traefik can also be used)
+    # Ingress class
     kubernetes.io/ingress.class: nginx
+    # cert-manager TLS automation
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Body size (code submissions)
     nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    # Timeouts
     nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
     # WebSocket support
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
     nginx.ingress.kubernetes.io/configuration-snippet: |
@@ -25,9 +74,20 @@ metadata:
     nginx.ingress.kubernetes.io/cors-allow-origin: "*"
     nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, OPTIONS"
     nginx.ingress.kubernetes.io/cors-allow-headers: "Content-Type, Authorization, X-Request-ID"
+    # Security headers
+    nginx.ingress.kubernetes.io/server-snippet: |
+      add_header X-Frame-Options "SAMEORIGIN" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - sentinel.example.com          # 🔒 Replace with your domain
+      secretName: sentinel-tls
   rules:
-    - host: sentinel.local  # Change to your domain
+    - host: sentinel.example.com        # 🔒 Replace with your domain
       http:
         paths:
           # API routes
@@ -46,7 +106,7 @@ spec:
                 name: sentinel-api
                 port:
                   name: http
-          # Health check
+          # Health check (publicly accessible)
           - path: /health
             pathType: Exact
             backend:
@@ -54,7 +114,7 @@ spec:
                 name: sentinel-api
                 port:
                   name: http
-          # Frontend (catch-all)
+          # Frontend (catch-all — must be last)
           - path: /
             pathType: Prefix
             backend:
@@ -62,13 +122,8 @@ spec:
                 name: sentinel-frontend
                 port:
                   name: http
-  # TLS configuration (uncomment for production)
-  # tls:
-  #   - hosts:
-  #       - sentinel.local
-  #     secretName: sentinel-tls
 ---
-# Frontend Deployment & Service
+# ── Frontend Deployment ──
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -80,6 +135,12 @@ metadata:
     app.kubernetes.io/part-of: sentinel
 spec:
   replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: sentinel-frontend
@@ -92,6 +153,7 @@ spec:
       containers:
         - name: frontend
           image: ghcr.io/harsh-bh/sentinel-frontend:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 80
@@ -115,7 +177,9 @@ spec:
               port: http
             initialDelaySeconds: 3
             periodSeconds: 5
+      restartPolicy: Always
 ---
+# Frontend Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -133,3 +197,18 @@ spec:
       name: http
   selector:
     app.kubernetes.io/name: sentinel-frontend
+---
+# Frontend PodDisruptionBudget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sentinel-frontend-pdb
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-frontend
+    app.kubernetes.io/component: frontend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-frontend

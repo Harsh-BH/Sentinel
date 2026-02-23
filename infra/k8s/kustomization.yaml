@@ -1,0 +1,42 @@
+# =============================================================================
+# Project Sentinel — Kustomize Base
+# =============================================================================
+# Apply order matters: namespace → secrets/config → infra → apps → networking
+# Usage:
+#   kubectl apply -k infra/k8s/
+#   kubectl delete -k infra/k8s/
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: sentinel
+
+commonLabels:
+  app.kubernetes.io/managed-by: kustomize
+  app.kubernetes.io/part-of: sentinel
+
+resources:
+  # 1. Namespace + governance
+  - namespace.yaml
+
+  # 2. Secrets & ConfigMaps (must exist before deployments reference them)
+  - secrets.yaml
+  - configmaps.yaml
+
+  # 3. Infrastructure StatefulSets (data layer)
+  - postgres-statefulset.yaml
+  - rabbitmq-statefulset.yaml
+  - redis-statefulset.yaml
+
+  # 4. Application Deployments
+  - api-deployment.yaml
+  - worker-deployment.yaml
+
+  # 5. Ingress + Frontend
+  - ingress.yaml
+
+  # 6. Autoscaling
+  - keda-scaledobject.yaml
+
+  # 7. Network Policies
+  - network-policies.yaml

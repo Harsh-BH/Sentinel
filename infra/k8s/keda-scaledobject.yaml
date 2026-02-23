@@ -1,3 +1,10 @@
+# =============================================================================
+# Project Sentinel — KEDA ScaledObject (Worker Auto-Scaling)
+# =============================================================================
+# Scales sentinel-worker based on RabbitMQ execution_tasks queue depth.
+# value=15 → scale up when >15 messages per worker
+# minReplicaCount=2, maxReplicaCount=50
+# =============================================================================
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -10,35 +17,60 @@ metadata:
 spec:
   scaleTargetRef:
     name: sentinel-worker
-  pollingInterval: 5          # Check queue every 5s
-  cooldownPeriod: 30          # Wait 30s before scaling down
-  minReplicaCount: 1          # Always keep at least 1 worker
-  maxReplicaCount: 10         # Max 10 worker pods
+  pollingInterval: 5          # Check queue every 5 seconds
+  cooldownPeriod: 60          # Wait 60s before scaling down
+  idleReplicaCount: 0         # Scale to 0 when no messages (optional, remove if always-on)
+  minReplicaCount: 2          # Always keep at least 2 workers
+  maxReplicaCount: 50         # Max 50 worker pods
   fallback:
     failureThreshold: 3
-    replicas: 2               # Fallback to 2 replicas if metrics fail
+    replicas: 3               # Fallback to 3 replicas if metrics unavailable
+  advanced:
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 15
+          policies:
+            - type: Pods
+              value: 5
+              periodSeconds: 30
+            - type: Percent
+              value: 100
+              periodSeconds: 30
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 120
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 60
+          selectPolicy: Min
   triggers:
     - type: rabbitmq
       metadata:
         protocol: amqp
         queueName: execution_tasks
         mode: QueueLength
-        value: "5"            # Scale up when >5 messages per worker
+        value: "15"           # Scale up when >15 messages per worker
       authenticationRef:
         name: sentinel-rabbitmq-trigger-auth
 ---
+# TriggerAuthentication — references worker secrets for RabbitMQ connection
 apiVersion: keda.sh/v1alpha1
 kind: TriggerAuthentication
 metadata:
   name: sentinel-rabbitmq-trigger-auth
   namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: sentinel
 spec:
   secretTargetRef:
     - parameter: host
       name: sentinel-worker-secrets
       key: RABBITMQ_URL
 ---
-# HorizontalPodAutoscaler for API (CPU-based fallback)
+# ── API HorizontalPodAutoscaler (CPU-based fallback) ──
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -52,8 +84,8 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: sentinel-api
-  minReplicas: 2
-  maxReplicas: 8
+  minReplicas: 3
+  maxReplicas: 10
   metrics:
     - type: Resource
       resource:

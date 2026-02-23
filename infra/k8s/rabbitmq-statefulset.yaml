@@ -1,3 +1,8 @@
+# =============================================================================
+# Project Sentinel — RabbitMQ StatefulSet (3-node cluster)
+# =============================================================================
+# Quorum queues for durability, Prometheus metrics, persistent storage
+# =============================================================================
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -8,8 +13,11 @@ metadata:
     app.kubernetes.io/component: messaging
     app.kubernetes.io/part-of: sentinel
 spec:
-  serviceName: sentinel-rabbitmq
-  replicas: 1
+  serviceName: sentinel-rabbitmq-headless
+  replicas: 3
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
   selector:
     matchLabels:
       app.kubernetes.io/name: sentinel-rabbitmq
@@ -18,7 +26,12 @@ spec:
       labels:
         app.kubernetes.io/name: sentinel-rabbitmq
         app.kubernetes.io/component: messaging
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "15692"
+        prometheus.io/path: "/metrics"
     spec:
+      terminationGracePeriodSeconds: 120
       containers:
         - name: rabbitmq
           image: rabbitmq:3.13-management-alpine
@@ -31,6 +44,12 @@ spec:
               protocol: TCP
             - name: metrics
               containerPort: 15692
+              protocol: TCP
+            - name: epmd
+              containerPort: 4369
+              protocol: TCP
+            - name: clustering
+              containerPort: 25672
               protocol: TCP
           env:
             - name: RABBITMQ_DEFAULT_USER
@@ -45,13 +64,23 @@ spec:
                   key: RABBITMQ_PASSWORD
             - name: RABBITMQ_DEFAULT_VHOST
               value: /
+            - name: RABBITMQ_ERLANG_COOKIE
+              value: "sentinel-erlang-cookie"    # 🔒 Use Secret in production
+            - name: RABBITMQ_USE_LONGNAME
+              value: "true"
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RABBITMQ_NODENAME
+              value: "rabbit@$(MY_POD_NAME).sentinel-rabbitmq-headless.sentinel.svc.cluster.local"
           resources:
             requests:
-              cpu: 100m
+              cpu: 200m
               memory: 256Mi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: "1"
+              memory: 1Gi
           volumeMounts:
             - name: rabbitmq-data
               mountPath: /var/lib/rabbitmq
@@ -59,13 +88,17 @@ spec:
               mountPath: /etc/rabbitmq/conf.d/20-custom.conf
               subPath: rabbitmq.conf
               readOnly: true
+            - name: rabbitmq-plugins
+              mountPath: /etc/rabbitmq/enabled_plugins
+              subPath: enabled_plugins
+              readOnly: true
           livenessProbe:
             exec:
               command:
                 - rabbitmq-diagnostics
                 - -q
                 - ping
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
@@ -75,12 +108,15 @@ spec:
                 - rabbitmq-diagnostics
                 - -q
                 - check_running
-            initialDelaySeconds: 10
+            initialDelaySeconds: 20
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
       volumes:
         - name: rabbitmq-config
+          configMap:
+            name: sentinel-rabbitmq-config
+        - name: rabbitmq-plugins
           configMap:
             name: sentinel-rabbitmq-config
   volumeClaimTemplates:
@@ -94,6 +130,32 @@ spec:
             storage: 5Gi
         storageClassName: local-path
 ---
+# Headless Service for StatefulSet DNS (peer discovery)
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel-rabbitmq-headless
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: sentinel-rabbitmq
+    app.kubernetes.io/component: messaging
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 5672
+      targetPort: amqp
+      name: amqp
+    - port: 4369
+      targetPort: epmd
+      name: epmd
+    - port: 25672
+      targetPort: clustering
+      name: clustering
+  selector:
+    app.kubernetes.io/name: sentinel-rabbitmq
+---
+# Client-facing Service (load balanced)
 apiVersion: v1
 kind: Service
 metadata:
@@ -113,29 +175,24 @@ spec:
       targetPort: management
       protocol: TCP
       name: management
+    - port: 15692
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
   selector:
     app.kubernetes.io/name: sentinel-rabbitmq
 ---
-apiVersion: v1
-kind: Secret
+# PodDisruptionBudget — majority must be available for quorum
+apiVersion: policy/v1
+kind: PodDisruptionBudget
 metadata:
-  name: sentinel-rabbitmq-secrets
+  name: sentinel-rabbitmq-pdb
   namespace: sentinel
-type: Opaque
-stringData:
-  RABBITMQ_USER: sentinel
-  RABBITMQ_PASSWORD: changeme
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: sentinel-rabbitmq-config
-  namespace: sentinel
-data:
-  rabbitmq.conf: |
-    # Prometheus metrics
-    prometheus.return_per_object_metrics = true
-    # Memory watermark
-    vm_memory_high_watermark.relative = 0.7
-    # Disk free limit
-    disk_free_limit.relative = 1.5
+  labels:
+    app.kubernetes.io/name: sentinel-rabbitmq
+    app.kubernetes.io/component: messaging
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sentinel-rabbitmq
