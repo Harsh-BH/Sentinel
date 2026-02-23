@@ -245,6 +245,8 @@ make docker-push        # Push images to GHCR
 make health             # Check health of running services
 make monitoring-up      # Start Prometheus + Grafana
 make monitoring-status  # Check monitoring endpoints
+make load-test          # Run k6 load test (requires k6)
+make security-audit     # Run sandbox security audit
 ```
 
 ### Kubernetes (k3s) Deployment
@@ -386,6 +388,18 @@ The deploy workflow (`.github/workflows/deploy.yml`) can be triggered manually o
 
 ---
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Architecture](./docs/architecture.md) | System design, data flow diagrams, security model |
+| [API Reference](./docs/api.md) | Full endpoint docs with OpenAPI 3.0 specification |
+| [Deployment Guide](./docs/deployment.md) | Docker Compose & Kubernetes deployment instructions |
+| [Performance Tuning](./docs/tuning.md) | Component-by-component tuning parameters |
+| [MASTER_PLAN.md](./MASTER_PLAN.md) | Complete 10-phase project specification |
+
+---
+
 ## Roadmap
 
 See [MASTER_PLAN.md](./MASTER_PLAN.md) for the full 10-phase development plan:
@@ -399,7 +413,7 @@ See [MASTER_PLAN.md](./MASTER_PLAN.md) for the full 10-phase development plan:
 - ✅ **Phase 6**: CI/CD pipeline (GitHub Actions, GHCR, integration tests)
 - ✅ **Phase 7**: Kubernetes deployment (k3s + KEDA + network policies)
 - ✅ **Phase 8**: Observability (Prometheus + Grafana + alerting)
-- 🔲 **Phase 9**: Documentation & launch
+- ✅ **Phase 9**: Load testing, hardening & documentation
 
 ---
 

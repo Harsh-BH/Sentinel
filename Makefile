@@ -12,7 +12,8 @@
         docker-build docker-build-api docker-build-worker docker-build-frontend \
         docker-push \
         k8s-apply k8s-delete k8s-status k8s-logs k8s-setup k8s-teardown \
-        monitoring-up monitoring-down monitoring-status
+        monitoring-up monitoring-down monitoring-status \
+        load-test security-audit
 
 # Default target
 help: ## Show this help
@@ -228,6 +229,18 @@ k8s-monitoring-portforward: ## Port-forward Grafana + Prometheus
 	@echo "Press Ctrl+C to stop"
 	@kubectl port-forward -n monitoring svc/prometheus 9091:9090 &
 	@kubectl port-forward -n monitoring svc/grafana 3001:3000
+
+# ---------- Load Testing & Security ----------
+
+BASE_URL ?= http://localhost:8080
+
+load-test: ## Run k6 load test (set BASE_URL for custom target)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 is required: https://k6.io/docs/getting-started/installation/"; exit 1; }
+	k6 run --env BASE_URL=$(BASE_URL) scripts/load-test.js
+
+security-audit: ## Run sandbox security audit (requires running stack)
+	@chmod +x scripts/security-audit.sh
+	./scripts/security-audit.sh
 
 # ---------- Cleanup ----------
 
