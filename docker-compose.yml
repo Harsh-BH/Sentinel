@@ -61,7 +61,7 @@ services:
     container_name: sentinel-redis
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -115,6 +115,7 @@ services:
       dockerfile: worker/Dockerfile
     container_name: sentinel-worker
     privileged: true   # Required for nsjail namespace creation (CLONE_NEWUSER, etc.)
+    cgroup: host       # nsjail's cgroup v2 setup needs the host cgroup hierarchy
     environment:
       DATABASE_URL: "postgres://sentinel:sentinel_secret@postgres:5432/sentinel?sslmode=disable"
       RABBITMQ_URL: "amqp://sentinel:sentinel_secret@rabbitmq:5672/"

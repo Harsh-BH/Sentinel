@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git build-essential cmake pkg-config \
     libprotobuf-dev protobuf-compiler \
     libnl-3-dev libnl-route-3-dev \
+    flex bison \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -67,12 +68,13 @@ RUN mkdir -p /tmp/sentinel && chmod 1777 /tmp/sentinel
 
 # Create sandbox rootfs with required system directories
 # nsjail bind-mounts these into the namespace
-RUN mkdir -p /sandbox/rootfs/{bin,usr,lib,lib64,dev,proc,tmp,home/runner,etc} && \
+RUN mkdir -p /sandbox/rootfs /sandbox/rootfs/dev /sandbox/rootfs/proc \
+        /sandbox/rootfs/tmp /sandbox/rootfs/home/runner /sandbox/rootfs/etc && \
     cp -a /usr /sandbox/rootfs/ && \
     cp -a /lib /sandbox/rootfs/ && \
-    cp -a /lib64 /sandbox/rootfs/ 2>/dev/null || true && \
+    (cp -a /lib64 /sandbox/rootfs/ 2>/dev/null || true) && \
     cp -a /bin /sandbox/rootfs/ && \
-    cp -a /etc/alternatives /sandbox/rootfs/etc/ 2>/dev/null || true && \
+    (cp -a /etc/alternatives /sandbox/rootfs/etc/ 2>/dev/null || true) && \
     chmod 1777 /sandbox/rootfs/tmp
 
 EXPOSE 9090

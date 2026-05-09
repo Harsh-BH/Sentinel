@@ -34,7 +34,7 @@ POLICY python {
     ioctl,
     pipe,
     pipe2
-  }
+  },
 
   /* Memory management */
   ALLOW {
@@ -44,7 +44,7 @@ POLICY python {
     munmap,
     mremap,
     madvise
-  }
+  },
 
   /* Process lifecycle */
   ALLOW {
@@ -63,7 +63,7 @@ POLICY python {
     getegid,
     getgroups,
     setgroups
-  }
+  },
 
   /* Signals */
   ALLOW {
@@ -71,7 +71,7 @@ POLICY python {
     rt_sigprocmask,
     rt_sigreturn,
     sigaltstack
-  }
+  },
 
   /* Thread synchronization */
   ALLOW {
@@ -80,7 +80,7 @@ POLICY python {
     set_robust_list,
     get_robust_list,
     rseq
-  }
+  },
 
   /* System information */
   ALLOW {
@@ -89,7 +89,7 @@ POLICY python {
     arch_prctl,
     prlimit64,
     getrandom
-  }
+  },
 
   /* Time */
   ALLOW {
@@ -98,7 +98,7 @@ POLICY python {
     gettimeofday,
     nanosleep,
     clock_nanosleep
-  }
+  },
 
   /* Misc */
   ALLOW {

@@ -199,13 +199,13 @@ func (p *rabbitPublisher) Publish(ctx context.Context, job *domain.Job) error {
 		return fmt.Errorf("rabbitmq: channel not available (reconnecting)")
 	}
 
-	// Get confirmation channel
-	confirm := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
-
 	publishCtx, cancel := context.WithTimeout(ctx, publishTimeout)
 	defer cancel()
 
-	err = ch.PublishWithContext(publishCtx,
+	// PublishWithDeferredConfirmWithContext returns a *DeferredConfirmation
+	// scoped to this publish only — unlike NotifyPublish, it does not register
+	// a per-call listener that would accumulate stale entries on the channel.
+	confirm, err := ch.PublishWithDeferredConfirmWithContext(publishCtx,
 		exchangeName,
 		routingKey,
 		false, // mandatory
@@ -222,14 +222,8 @@ func (p *rabbitPublisher) Publish(ctx context.Context, job *domain.Job) error {
 		return fmt.Errorf("rabbitmq: publish: %w", err)
 	}
 
-	// Wait for broker confirmation
-	select {
-	case ack := <-confirm:
-		if !ack.Ack {
-			return fmt.Errorf("rabbitmq: broker nacked message (job_id=%s)", job.JobID)
-		}
-	case <-publishCtx.Done():
-		return fmt.Errorf("rabbitmq: publish confirmation timeout (job_id=%s)", job.JobID)
+	if !confirm.Wait() {
+		return fmt.Errorf("rabbitmq: broker nacked message (job_id=%s)", job.JobID)
 	}
 
 	p.logger.Debug("Published job to RabbitMQ",
