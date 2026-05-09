@@ -74,7 +74,10 @@ func (c *Consumer) connect() error {
 		return fmt.Errorf("amqp qos: %w", err)
 	}
 
-	// Declare the queue (idempotent) — ensures it exists with quorum type.
+	// Declare the queue (idempotent) — args MUST match the API publisher's
+	// declaration in api/internal/publisher/rabbitmq.go or RabbitMQ returns
+	// PRECONDITION_FAILED. The API owns the canonical topology; the worker
+	// only re-declares so it can boot before the API.
 	_, err = ch.QueueDeclare(
 		queueName,
 		true,  // durable
@@ -82,9 +85,8 @@ func (c *Consumer) connect() error {
 		false, // exclusive
 		false, // no-wait
 		amqplib.Table{
-			"x-queue-type":              "quorum",
-			"x-dead-letter-exchange":    "dlx.execution_tasks",
-			"x-dead-letter-routing-key": "execution_tasks.dlq",
+			"x-queue-type":           "quorum",
+			"x-dead-letter-exchange": "sentinel.dlx",
 		},
 	)
 	if err != nil {
