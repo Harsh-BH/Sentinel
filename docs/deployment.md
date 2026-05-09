@@ -25,17 +25,30 @@
 
 ## Prerequisites
 
-### All Environments
+### Host kernel requirement (read this first)
+
+The worker spawns a Linux-namespaced sandbox via `nsjail`, which **only runs on a Linux kernel** with **cgroup v2** (single hierarchy, mounted at `/sys/fs/cgroup`). The control plane (API, frontend, deps) is portable, but the worker container must be backed by a Linux kernel.
+
+| Host | What runs the worker | Status |
+|---|---|---|
+| Linux (kernel ≥ 5.4) | host kernel directly | ✅ |
+| Windows 10/11 + Docker Desktop with WSL2 | WSL2 Linux VM | ✅ |
+| Windows + Docker Desktop, Hyper-V backend (no WSL2) | Hyper-V VM | ⚠️ untested; cgroup v2 likely missing |
+| macOS + Docker Desktop (xhyve / VZ) | Docker Desktop's VM | ❌ does not expose a usable cgroup v2 hierarchy |
+| macOS + [Colima](https://github.com/abiosoft/colima) | Lima VM | ✅ tested |
+
+### Common dependencies
 
 | Tool | Version | Purpose |
 |------|---------|---------|
 | Git | 2.30+ | Clone the repository |
 | Docker | 24.0+ | Build container images |
 | Docker Compose | v2.20+ | Local development stack |
-| Go | 1.23+ | Build API and worker binaries |
-| Node.js | 20+ | Build the frontend |
+| Go | 1.23+ | **Optional** — only for native (non-container) `dev-api` / `dev-worker` |
+| Node.js | 20+ | **Optional** — only for native `dev-frontend` |
+| nsjail | latest | **Optional** — only for native `dev-worker` (Linux host only) |
 
-### Production Only
+### Production only
 
 | Tool | Version | Purpose |
 |------|---------|---------|
@@ -44,7 +57,7 @@
 | Helm | v3.14+ | Installed automatically by setup script |
 | curl | — | Downloading components |
 
-### Hardware Recommendations
+### Hardware recommendations
 
 | Environment | CPU | RAM | Disk | Notes |
 |-------------|-----|-----|------|-------|
@@ -54,47 +67,89 @@
 
 ---
 
-## Local Development (Docker Compose)
+## Local development (Docker Compose)
 
-### Quick Start
+### Linux
 
 ```bash
-# 1. Clone and configure
+# Ubuntu/Debian — equivalents exist for Fedora/Arch
+sudo apt-get install -y docker.io docker-compose-plugin git make
+
 git clone https://github.com/Harsh-BH/Sentinel.git
 cd Sentinel
-cp .env.example .env   # Edit as needed
+cp .env.example .env
 
-# 2. Start everything
 make up
-
-# 3. Verify
-make health
+make health   # all five containers should show ✅
 ```
 
-### Service Endpoints
+Open http://localhost:3000.
+
+### Windows (Docker Desktop + WSL2)
+
+1. Install [Docker Desktop](https://docs.docker.com/desktop/install/windows-install/). In **Settings → General**, ensure **"Use the WSL 2 based engine"** is checked.
+2. Install **either**:
+   - [Git for Windows](https://git-scm.com/download/win) — gives you Git Bash, which can run `docker` commands and most Make targets.
+   - **or** a WSL2 distro: `wsl --install -d Ubuntu`. Then run all Sentinel commands from inside that distro — file ops will be much faster on `/home/...` than on `/mnt/c/...`.
+3. From Git Bash or your WSL2 shell:
+
+   ```bash
+   git clone https://github.com/Harsh-BH/Sentinel.git
+   cd Sentinel
+   cp .env.example .env
+   make up        # or: docker compose up -d --build
+   ```
+
+4. Open http://localhost:3000.
+
+If `make` is unavailable in Git Bash, install it (`winget install GnuWin32.Make`) or just use the underlying `docker compose ...` commands directly.
+
+### macOS (Colima)
+
+Docker Desktop's macOS VM does not expose a usable cgroup v2 hierarchy to nsjail. Use Colima:
+
+```bash
+brew install colima docker docker-compose make
+colima start --cpu 4 --memory 8 --vm-type=vz   # vz is faster on Apple Silicon
+git clone https://github.com/Harsh-BH/Sentinel.git
+cd Sentinel
+cp .env.example .env
+make up
+```
+
+Open http://localhost:3000.
+
+### Service endpoints
 
 | Service | URL | Purpose |
 |---------|-----|---------|
-| Frontend | http://localhost:5173 | Monaco code editor UI |
+| Frontend (Docker / nginx) | http://localhost:3000 | Monaco code editor UI |
+| Frontend (Vite dev) | http://localhost:5173 | Only when `make dev-frontend` is used |
 | API | http://localhost:8080 | REST + WebSocket API |
+| Worker metrics | http://localhost:9090 | Prometheus metrics + healthz |
 | Prometheus | http://localhost:9091 | Metrics scraping |
 | Grafana | http://localhost:3001 | Dashboards (admin/sentinel) |
-| RabbitMQ Admin | http://localhost:15672 | Queue management (sentinel/sentinel_secret) |
+| RabbitMQ admin | http://localhost:15672 | Queue management (sentinel/sentinel_secret) |
+| Redis | localhost:**6380** | Remapped from default 6379 to avoid host conflicts |
 
-### Selective Startup
+### Selective startup
 
 ```bash
 # Infrastructure only (Postgres, RabbitMQ, Redis)
 make up-infra
 
-# Run services locally (better for debugging)
+# Run services natively — Linux only for dev-worker (needs nsjail on host)
 make dev-api       # Terminal 1
-make dev-worker    # Terminal 2
+make dev-worker    # Terminal 2  (Linux + nsjail required)
 make dev-frontend  # Terminal 3
 
 # Add monitoring
 make monitoring-up
 ```
+
+Notes for native dev:
+- `make dev-worker` needs `nsjail` on the host PATH and a Linux kernel with cgroup v2. Windows/macOS users should keep the worker in its container and only run the API/frontend natively.
+- `WORKER_SANDBOX_CONFIG_DIR` and `WORKER_POLICY_DIR` in `.env` default to `./sandbox/nsjail` and `./sandbox/policies` — fine for native dev. The container build copies these to `/etc/sentinel/...`.
 
 ### Database Migrations
 
@@ -469,7 +524,24 @@ kubectl scale deployment/api -n sentinel --replicas=5
 
 ## Troubleshooting
 
-### Pods Not Starting
+### Local Development (Docker Compose)
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `failed to bind host port 0.0.0.0:6379` on `make up` | Host already runs a Redis on 6379 | Compose remaps Redis to host **6380**; in-cluster networking is unaffected. If you need 6379, stop the host Redis. |
+| Worker crash-loops with `PRECONDITION_FAILED ... 'x-dead-letter-exchange' for queue 'execution_tasks'` | Old broker volume from before the queue-arg alignment | `make down-clean` to drop volumes, then `make up`. |
+| Worker logs `Couldn't open the kafel seccomp policy file '/etc/nsjail/...'` | Stale image with the old policy path | `docker compose build --no-cache worker && docker compose up -d worker`. |
+| Worker logs `nsjail MUST be run from root and the cgroup mount path must refer to the root/host cgroup` | Container cgroup namespace is `private` | Compose now sets `cgroup: host` on the worker. Pull main; verify with `docker inspect sentinel-worker \| grep -i cgroup`. |
+| Sandbox returns `RUNTIME_ERROR` exit 255 with empty stdout for every job | Cgroup v1 host or missing `use_cgroupv2: true` in nsjail config | Confirm host has cgroup v2: `mount \| grep cgroup` should show `cgroup2 ... type cgroup2`. On macOS Docker Desktop, switch to Colima. |
+| `POST /api/v1/submissions` hangs and returns 503 after 5 s, repeatedly | Stale RabbitMQ publisher channel state | `docker compose restart api`. The deferred-confirm fix in `api/internal/publisher/rabbitmq.go` prevents this from recurring. |
+| Frontend loads but throws `o.id is undefined` and never shows results | Old frontend bundle (built before the API-shape adapter) | `docker compose up -d --build frontend`. |
+| `make: command not found` on Windows | Git Bash lacks GNU make | Either `winget install GnuWin32.Make`, or run the underlying `docker compose ...` commands directly. |
+| WebSocket connects but immediately closes | `nginx.conf` missing `Upgrade`/`Connection` headers on `/api/` | Pull main; the frontend image now ships the corrected nginx.conf. |
+| `make migrate` fails with "psql: command not found" | Host doesn't have `psql` | The compose stack auto-runs `migrations/001_initial_schema.up.sql` via Postgres's `/docker-entrypoint-initdb.d/`. You only need `make migrate` for native dev or to re-apply against an existing DB. |
+
+### Kubernetes / production
+
+#### Pods Not Starting
 
 ```bash
 # Check pod events
@@ -481,7 +553,7 @@ kubectl describe pod -n sentinel <pod-name>
 # - Pending → Check resource quotas: kubectl describe resourcequota -n sentinel
 ```
 
-### API Returns 503
+#### API Returns 503
 
 ```bash
 # Check backend health
@@ -493,7 +565,7 @@ kubectl exec -n sentinel deploy/api -- curl -s localhost:8080/api/v1/health
 # - Redis down → Check redis pod and memory usage
 ```
 
-### Jobs Stuck in QUEUED
+#### Jobs Stuck in QUEUED
 
 ```bash
 # Check worker pods
@@ -509,7 +581,7 @@ kubectl exec -n sentinel sentinel-rabbitmq-0 -- \
 # - KEDA not scaling → Check ScaledObject: kubectl describe scaledobject -n sentinel
 ```
 
-### High Latency
+#### High Latency
 
 ```bash
 # Check Grafana dashboards for bottlenecks
@@ -520,7 +592,7 @@ kubectl exec -n sentinel sentinel-rabbitmq-0 -- \
 # See docs/tuning.md for parameter tuning guide
 ```
 
-### Network Policy Issues
+#### Network Policy Issues
 
 ```bash
 # Verify policies
@@ -531,7 +603,7 @@ kubectl run debug --rm -it --namespace sentinel --image=busybox -- sh
 # Inside: wget -qO- http://api:8080/api/v1/health
 ```
 
-### Monitoring Not Scraping
+#### Monitoring Not Scraping
 
 ```bash
 # Check Prometheus targets
@@ -544,7 +616,7 @@ kubectl port-forward -n monitoring svc/prometheus 9091:9090
 # - Pod labels changed → Update relabel configs
 ```
 
-### Full Reset
+#### Full Reset
 
 ```bash
 # Nuclear option: tear everything down and reinstall

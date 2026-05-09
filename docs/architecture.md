@@ -96,27 +96,24 @@ frontend/src/
 api/internal/
 ├── config/          ← Viper environment config
 ├── delivery/http/
-│   ├── router.go           ← Route definitions
-│   ├── submission.go       ← Submit + Get handlers
-│   ├── health.go           ← Health check (DB, AMQP, Redis)
-│   ├── language.go         ← GET /languages
-│   ├── websocket.go        ← WebSocket upgrade + streaming
-│   └── middleware/
-│       ├── cors.go         ← CORS headers
-│       ├── logger.go       ← Structured request logging (zap)
-│       ├── ratelimiter.go  ← Redis sliding window
-│       ├── requestid.go    ← X-Request-ID header
-│       └── bodysize.go     ← 1MB body limit
+│   ├── router.go               ← Route definitions
+│   ├── submission_handler.go   ← Submit + Get handlers
+│   ├── health_handler.go       ← Health check (DB, AMQP, Redis)
+│   ├── language_handler.go     ← GET /languages
+│   ├── websocket_handler.go    ← WebSocket upgrade + streaming
+│   └── middleware/             ← CORS, logger, rate limiter, request ID, body size
 ├── domain/
-│   ├── job.go              ← Core types (Job, SubmitRequest, Status)
-│   └── errors.go           ← Domain error types
+│   ├── job.go                  ← Core types (Job, SubmitRequest, Status)
+│   └── errors.go               ← Domain error types
 ├── publisher/
-│   └── rabbitmq.go         ← AMQP publisher (quorum queue)
+│   └── rabbitmq.go             ← AMQP publisher (quorum queue)
 ├── repository/
-│   └── postgres.go         ← pgx CRUD operations
+│   ├── job_repository.go       ← Repository interface
+│   ├── postgres/               ← pgx implementation
+│   └── mock/                   ← test doubles
 └── usecase/
-    ├── submit.go           ← Submit flow (validate → persist → publish)
-    └── getjob.go           ← Fetch job + status
+    ├── submit_job.go           ← Submit flow (validate → persist → publish)
+    └── get_job.go              ← Fetch job + status
 ```
 
 **Request flow**:
@@ -132,20 +129,23 @@ api/internal/
 worker/internal/
 ├── config/          ← Viper environment config
 ├── delivery/amqp/
-│   └── consumer.go         ← RabbitMQ consumer (ACK-after-execute)
+│   └── consumer.go         ← RabbitMQ consumer (manual ACK after execute)
 ├── domain/
-│   └── execution.go        ← Execution types
+│   └── execution.go        ← Execution types (Job, JobMessage, ExecutionRequest/Result)
 ├── executor/
-│   └── nsjail.go           ← Sandbox execution (nsjail CLI wrapper)
+│   ├── sandbox.go          ← Sandbox execution (nsjail CLI wrapper, Python + C++)
+│   └── sandbox_*_test.go   ← Unit + integration tests (latter requires nsjail on PATH)
 ├── metrics/
 │   └── prometheus.go       ← Custom Prometheus metrics
 ├── pool/
 │   └── pool.go             ← Goroutine worker pool
 ├── repository/
-│   ├── postgres.go         ← Update job results
-│   └── redis.go            ← Idempotency checks
+│   ├── interfaces.go       ← Repository + IdempotencyStore interfaces
+│   ├── postgres/           ← pgx implementation (status + result updates)
+│   ├── redis/              ← Idempotency lock implementation
+│   └── mock/               ← test doubles
 └── usecase/
-    └── execute.go          ← Orchestrate: consume → execute → persist → ACK
+    └── execute_job.go      ← Orchestrate: consume → idempotency → execute → persist → ACK
 ```
 
 **Execution flow**:
@@ -181,7 +181,7 @@ worker/internal/
    │                        │                        │  CONSUME message   │
    │                        │                        │───────────────────▶│
    │                        │                        │                    │
-   │  WS /submissions/:id/stream                     │  UPDATE → RUNNING │
+   │  WS /api/v1/submissions/:id/stream              │  UPDATE → RUNNING │
    │───────────────────────▶│                        │──────▶ PostgreSQL │
    │                        │                        │                    │
    │  {status: RUNNING}     │                        │    nsjail exec    │
@@ -376,32 +376,50 @@ POLICY python {
 
 ### PostgreSQL Schema
 
+See `migrations/001_initial_schema.up.sql` for the canonical DDL. Summary:
+
 ```sql
--- Core submissions table (partitioned by month)
-CREATE TABLE submissions (
-    job_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    language        VARCHAR(20) NOT NULL,
+-- ENUM types
+CREATE TYPE execution_status AS ENUM (
+    'QUEUED', 'COMPILING', 'RUNNING', 'SUCCESS',
+    'COMPILATION_ERROR', 'RUNTIME_ERROR', 'TIMEOUT',
+    'MEMORY_LIMIT_EXCEEDED', 'INTERNAL_ERROR'
+);
+CREATE TYPE language AS ENUM ('python', 'cpp');
+
+-- Range-partitioned by created_at (quarterly partitions)
+CREATE TABLE execution_jobs (
+    job_id          UUID PRIMARY KEY,
+    language        language NOT NULL,
     source_code     TEXT NOT NULL,
     stdin           TEXT DEFAULT '',
     stdout          TEXT DEFAULT '',
     stderr          TEXT DEFAULT '',
-    status          VARCHAR(30) NOT NULL DEFAULT 'QUEUED',
-    exit_code       INTEGER,
-    time_used_ms    INTEGER,
-    memory_used_kb  INTEGER,
-    time_limit_ms   INTEGER NOT NULL DEFAULT 5000,
-    memory_limit_kb INTEGER NOT NULL DEFAULT 262144,
+    status          execution_status NOT NULL DEFAULT 'QUEUED',
+    exit_code       INT,
+    time_used_ms    INT,
+    memory_used_kb  INT,
+    time_limit_ms   INT NOT NULL DEFAULT 5000,
+    memory_limit_kb INT NOT NULL DEFAULT 262144,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 ) PARTITION BY RANGE (created_at);
 
--- Indexes for common queries
-CREATE INDEX idx_submissions_status ON submissions (status);
-CREATE INDEX idx_submissions_created ON submissions (created_at DESC);
-CREATE INDEX idx_submissions_language ON submissions (language);
+-- Quarterly partitions pre-created (2026 Q1, Q2, ...)
+
+-- Partial index keeps the active-job lookup hot in RAM
+CREATE INDEX idx_active_jobs ON execution_jobs(job_id)
+    WHERE status IN ('QUEUED', 'COMPILING', 'RUNNING');
+
+-- Compound index for status-based polling
+CREATE INDEX idx_jobs_status ON execution_jobs(status, created_at);
 ```
 
+Job IDs are UUIDv7 (time-ordered) generated in the API usecase, not by the database.
+
 ### RabbitMQ Message Schema
+
+The full `Job` struct (see `api/internal/domain/job.go`) is JSON-serialized as the message body. Minimum fields needed by the worker:
 
 ```json
 {
@@ -409,15 +427,20 @@ CREATE INDEX idx_submissions_language ON submissions (language);
   "language": "python",
   "source_code": "print('hello')",
   "stdin": "",
+  "status": "QUEUED",
   "time_limit_ms": 5000,
-  "memory_limit_kb": 262144
+  "memory_limit_kb": 262144,
+  "created_at": "2026-02-20T10:00:00Z",
+  "updated_at": "2026-02-20T10:00:00Z"
 }
 ```
 
-- **Exchange**: `execution_tasks` (direct)
-- **Queue**: `execution_tasks` (quorum, durable)
-- **DLX**: `execution_tasks.dlx` (dead-letter after 3 retries)
-- **Content-Type**: `application/json`
+- **Exchange**: `sentinel.direct` (direct, durable)
+- **Routing key**: `execute`
+- **Main queue**: `execution_tasks` (quorum, durable, prefetch=1, manual ack)
+- **DLX**: `sentinel.dlx` (direct, durable) → bound to `dead_letter_queue`
+- **Delivery mode**: persistent | **Content-Type**: `application/json`
+- **Publisher confirms**: enabled (API waits for broker ack before returning 202)
 
 ---
 

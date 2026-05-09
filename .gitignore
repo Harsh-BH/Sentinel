@@ -29,6 +29,9 @@ vendor/
 *.swo
 *~
 
+# Claude Code session state
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db

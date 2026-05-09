@@ -109,49 +109,98 @@ Sentinel/
 
 ## Quick Start
 
-### Prerequisites
+### Host requirements
 
-- **Go 1.23+**
-- **Node.js 20+** & npm
-- **Docker** & Docker Compose
-- **nsjail** (for local worker testing — [install guide](https://github.com/google/nsjail))
+The worker runs untrusted code inside `nsjail`, which depends on Linux kernel features (namespaces + cgroup v2). The execution path itself **only works on a Linux kernel** — but the kernel can be the host's (native Linux) or one provided by Docker Desktop's WSL2 backend (Windows) or Lima/Colima (macOS).
 
-### 1. Clone & Configure
+| Stack runs on | Native | Docker Desktop |
+|---|---|---|
+| Linux (kernel ≥ 5.4, cgroup v2) | ✅ everything works | ✅ everything works |
+| Windows 10/11 with WSL2 | ❌ no Linux kernel | ✅ via WSL2 backend |
+| macOS (Apple Silicon or Intel) | ❌ | ⚠️ Docker Desktop's xhyve backend lacks usable cgroup v2 — use Colima with `--cgroup-manager=systemd` or run Linux in a VM |
+
+If `cat /sys/fs/cgroup/cgroup.controllers` doesn't print `memory cpu pids` (or similar) in the worker container, the host doesn't expose cgroup v2 and the worker will fail to spawn sandboxes.
+
+### Recommended path: Docker Compose
+
+This is the lowest-friction setup on every platform. You don't need Go, Node, or nsjail on the host — only Docker.
+
+#### Linux
 
 ```bash
+# Prereqs (Ubuntu/Debian; equivalents exist for Fedora/Arch)
+sudo apt-get install -y docker.io docker-compose-plugin git make
+
 git clone https://github.com/Harsh-BH/Sentinel.git
 cd Sentinel
 cp .env.example .env
+
+make up          # builds API/worker/frontend images and starts the full stack
+make health      # all five services should report ✅
 ```
 
-### 2. Start Infrastructure
+Open http://localhost:3000.
+
+#### Windows (Docker Desktop + WSL2)
+
+1. Install [Docker Desktop](https://docs.docker.com/desktop/install/windows-install/) and enable the **WSL2 backend** (Settings → General → "Use the WSL 2 based engine").
+2. Install [Git for Windows](https://git-scm.com/download/win) (gives you Git Bash) **or** any WSL2 distro (`wsl --install -d Ubuntu`). Pick one — they both give you a POSIX shell with `make`.
+3. From that shell:
+
+   ```bash
+   git clone https://github.com/Harsh-BH/Sentinel.git
+   cd Sentinel
+   cp .env.example .env
+   make up
+   ```
+
+   If `make` is missing in Git Bash, you can run the underlying commands directly:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+4. Open http://localhost:3000.
+
+If port 6379 is already taken on Windows by a local Redis or another service, our compose maps Redis to host **6380** instead of 6379 — in-container networking is unaffected.
+
+#### macOS (Colima)
+
+Docker Desktop on macOS does not expose a usable cgroup v2 hierarchy to nsjail. Use [Colima](https://github.com/abiosoft/colima) instead:
 
 ```bash
-# Start PostgreSQL, RabbitMQ, Redis
+brew install colima docker docker-compose
+colima start --cpu 4 --memory 8 --vm-type=vz
+git clone https://github.com/Harsh-BH/Sentinel.git
+cd Sentinel
+cp .env.example .env
+make up
+```
+
+Open http://localhost:3000.
+
+### Local development (Linux only)
+
+If you want to run the API, worker, or frontend natively (e.g. for `dlv` debugging or hot-reload), you'll also need:
+
+- **Go 1.23+** — for the API and worker (`make dev-api`, `make dev-worker`)
+- **Node.js 20+** — for the frontend (`make dev-frontend`)
+- **nsjail** — only for `make dev-worker`; this is Linux-host-only. Either install from your distro (`sudo pacman -S nsjail`, or build from [google/nsjail](https://github.com/google/nsjail)) or just keep using the worker container and only run the API natively.
+
+```bash
+# Start dependencies in containers
 make up-infra
-
-# Run database migrations
 make migrate
+
+# Run services natively (3 terminals)
+make dev-api        # :8080
+make dev-worker     # :9090   (Linux only — needs nsjail)
+make dev-frontend   # :5173
 ```
 
-### 3. Run Services
+Note: in this mode the frontend dev server is on `:5173` (Vite), not `:3000` (nginx). The frontend will talk to the API on `:8080` directly via CORS rather than through the nginx proxy.
 
-```bash
-# Terminal 1 — API
-make dev-api
-
-# Terminal 2 — Worker
-make dev-worker
-
-# Terminal 3 — Frontend
-make dev-frontend
-```
-
-### 4. Open
-
-Navigate to [http://localhost:5173](http://localhost:5173)
-
-### Docker Compose (all-in-one)
+### Common Make targets
 
 ```bash
 make up          # Build & start everything
@@ -159,14 +208,20 @@ make down        # Stop everything
 make down-clean  # Stop & remove volumes
 make logs        # Follow logs
 make health      # Check service health
+make test-integration  # E2E tests against the compose stack
 ```
 
-### Integration Tests
+### Troubleshooting
 
-```bash
-# Run full E2E tests against Docker Compose stack
-make test-integration
-```
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `failed to bind host port 0.0.0.0:6379` | Host already has a Redis | Compose remaps Redis to host port 6380 — pull from main and rebuild, or kill the host process. |
+| Worker crash-loops with `PRECONDITION_FAILED ... 'x-dead-letter-exchange'` | Old broker volume from before the queue-arg fix | `make down-clean` to drop volumes, then `make up`. |
+| `Couldn't open the kafel seccomp policy file` in worker logs | Seccomp policy file path mismatch | Pull main; `sandbox/nsjail/*.cfg` now references `/etc/sentinel/policies/...`. |
+| Worker logs `nsjail MUST be run from root and the cgroup mount path must refer to the root/host cgroup` | Container is using `cgroupns: private` | Compose sets `cgroup: host` on the worker. Confirm with `docker inspect sentinel-worker \| grep -i cgroup`. |
+| Submissions hang on `POST /api/v1/submissions` and 503 after 5s | Stale RabbitMQ publisher channel | `docker compose restart api`. (The deferred-confirm fix prevents the recurring case.) |
+| Frontend crashes with `o.id is undefined` | Old frontend bundle (built before the API adapter) | `docker compose up -d --build frontend` to rebuild. |
+| `make: command not found` on Windows | Git Bash lacks make by default | Either `winget install GnuWin32.Make`, or run the docker compose commands directly (`docker compose up -d --build`). |
 
 ---
 
@@ -188,9 +243,8 @@ Content-Type: application/json
 **Response (202 Accepted)**:
 ```json
 {
-  "id": "01912345-6789-7abc-def0-123456789abc",
-  "status": "QUEUED",
-  "created_at": "2026-02-20T10:00:00Z"
+  "job_id": "01912345-6789-7abc-def0-123456789abc",
+  "status": "QUEUED"
 }
 ```
 
@@ -203,13 +257,13 @@ GET /api/v1/submissions/:id
 ### WebSocket Stream
 
 ```
-ws://localhost:8080/ws/submissions/:id
+ws://localhost:8080/api/v1/submissions/:id/stream
 ```
 
 ### Health Check
 
 ```http
-GET /health
+GET /api/v1/health
 ```
 
 ### List Languages

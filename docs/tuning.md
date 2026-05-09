@@ -137,7 +137,7 @@ The prefetch count controls how many messages each worker goroutine will buffer:
 | Setting | Value | Description |
 |---------|-------|-------------|
 | Queue type | Quorum | Replicated across RabbitMQ nodes for durability |
-| DLX | `execution_tasks.dlx` | Dead-letter exchange for failed messages |
+| DLX | `sentinel.dlx` | Dead-letter exchange for failed messages (bound to `dead_letter_queue`) |
 | TTL | None (infinite) | Messages wait until consumed |
 | Max length | None | KEDA handles backpressure via scaling |
 

@@ -58,8 +58,8 @@ Content-Type: application/json
 | `language` | string | ✅ | Programming language (`python` or `cpp`) |
 | `source_code` | string | ✅ | Source code to execute |
 | `stdin` | string | ❌ | Standard input for the program |
-| `time_limit_ms` | integer | ❌ | Time limit in milliseconds (default: 5000, max: 10000) |
-| `memory_limit_kb` | integer | ❌ | Memory limit in KB (default: 262144 = 256MB) |
+| `time_limit_ms` | integer | ❌ | Time limit in milliseconds (default: 5000, max: 30000) |
+| `memory_limit_kb` | integer | ❌ | Memory limit in KB (default: 262144 = 256 MB, max: 524288 = 512 MB) |
 
 #### Example Request
 
@@ -87,7 +87,7 @@ curl -X POST http://localhost:8080/api/v1/submissions \
 | Status | Condition | Body |
 |--------|-----------|------|
 | `400` | Invalid JSON, missing required fields, unsupported language, empty source code | `{"error": "Invalid language"}` |
-| `413` | Payload too large (>64KB source code) | `{"error": "Payload too large"}` |
+| `413` | Payload too large (request body or `source_code` > 1 MB) | `{"error": "Payload too large"}` |
 | `429` | Rate limit exceeded | `{"error": "Too many requests"}` |
 | `503` | Failed to publish to message queue | `{"error": "Service temporarily unavailable"}` |
 | `500` | Unexpected internal error | `{"error": "Internal server error"}` |
