@@ -9,14 +9,16 @@ The worker runs untrusted code submitted by anonymous users. The threat surface 
 
 The chosen primitive is [google/nsjail](https://github.com/google/nsjail) invoked as a subprocess from Go (`os/exec`), driven by a static protobuf config per language and a kafel seccomp policy. The worker writes source + stdin to an ephemeral `os.MkdirTemp` workdir, runs nsjail with that workdir as input, then deletes the workdir.
 
+> **Current status:** the kafel seccomp policies are authored (`sandbox/policies/`) but **not yet enforced** — the `seccomp_policy_file:` directive is commented out in both `sandbox/nsjail/*.cfg` pending a syscall-table audit (see [Known limitations](#known-limitations)). The six other layers below are active.
+
 ## Decision
 
-We layer seven independent isolation mechanisms. An attacker must break all seven to reach the host:
+We design for seven independent isolation mechanisms. An attacker must break every active layer to reach the host. Six are currently active; layer 4 (seccomp) is authored but temporarily disabled — see the note above and [Known limitations](#known-limitations):
 
 1. **`pivot_root` to a minimal rootfs** — only the language runtime (`python3.12` or `g++`) plus required `.so` files are visible. No `/etc/passwd`, no `/proc/self/exe` resolves to anything useful, no host paths reachable.
 2. **All seven Linux namespaces** — `PID`, `NET`, `MNT`, `UTS`, `IPC`, `USER`, `CGROUP`. Empty network namespace means even a kernel bug that unblocks `socket(2)` produces an unreachable socket — there is no route, no DNS, no `lo`.
 3. **Cgroups v2 limits** — `memory.max`, `pids.max`, `cpu.max`. Enforced by the kernel, not the runtime; even a runtime escape doesn't bypass them.
-4. **Seccomp-BPF allowlist via kafel** — see `sandbox/policies/{python,cpp}.policy`. Default is `KILL_PROCESS` for any unlisted syscall. Critical denies: `ptrace`, `mount`, `setuid/setgid`, all `socket`/`connect`/`bind` family.
+4. **Seccomp-BPF allowlist via kafel** *(authored, not yet enforced — see status note above)* — see `sandbox/policies/{python,cpp}.policy`. Intended default is `KILL_PROCESS` for any unlisted syscall, with critical denies for `ptrace`, `mount`, `setuid/setgid`, and the whole `socket`/`connect`/`bind` family. Currently commented out in the nsjail configs; the socket-family denial it would add is presently covered by the empty network namespace (layer 2).
 5. **Container-level hardening** — worker pod runs as non-root, drops all capabilities, mounts `/` read-only, with `securityContext.readOnlyRootFilesystem: true`.
 6. **NetworkPolicy default-deny** in the `sentinel` namespace — even if a sandboxed process somehow obtained network access, kube-proxy/CNI rules would drop the packets.
 7. **Application-layer guards** — request body limit (1 MB), source code limit (1 MB enforced in usecase), per-IP rate limiting, language allowlist.

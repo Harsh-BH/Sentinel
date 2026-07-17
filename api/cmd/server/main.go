@@ -24,7 +24,7 @@ import (
 func main() {
 	// Initialize logger
 	logger, _ := zap.NewProduction()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	logger.Info("Starting Sentinel API Server")
 

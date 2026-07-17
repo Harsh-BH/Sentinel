@@ -36,9 +36,9 @@
 ### Security Model (nsjail)
 
 - **Filesystem**: Read-only `pivot_root` with tmpfs scratch space
-- **Namespaces**: Full isolation (PID, NET, MNT, UTS, IPC, USER, CGROUP)
+- **Namespaces**: Full isolation (PID, NET, MNT, UTS, IPC, USER, CGROUP) — the empty network namespace means no network access
 - **Cgroups v2**: Memory (256MB), PIDs (64), CPU (1 core) limits
-- **Seccomp-BPF**: Allowlisted syscalls via Kafel policies — everything else is killed
+- **Seccomp-BPF**: Kafel syscall-allowlist policies are authored in `sandbox/policies/` but **not yet enforced** — the `seccomp_policy_file:` directive is commented out in `sandbox/nsjail/*.cfg` pending a kafel syscall-table audit (see [design doc 0001](docs/design/0001-sandbox-security.md)). Isolation currently rests on namespaces + cgroups + no-network.
 - **Timeouts**: Hard wall-clock limit (10s default) + process-group kill
 
 ---

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -323,23 +322,4 @@ func readCgroupMemoryPeak(workDir string) int {
 	}
 
 	return 0
-}
-
-// limitedReader wraps an io.Reader and caps reads at a byte limit.
-// Used for piping stdin if needed in the future.
-type limitedReader struct {
-	r         io.Reader
-	remaining int
-}
-
-func (lr *limitedReader) Read(p []byte) (n int, err error) {
-	if lr.remaining <= 0 {
-		return 0, io.EOF
-	}
-	if len(p) > lr.remaining {
-		p = p[:lr.remaining]
-	}
-	n, err = lr.r.Read(p)
-	lr.remaining -= n
-	return
 }
