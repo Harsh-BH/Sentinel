@@ -138,7 +138,9 @@ func TestGetByIDHandler_Success(t *testing.T) {
 	router.ServeHTTP(submitW, submitReq)
 
 	var submitResp domain.SubmitResponse
-	json.Unmarshal(submitW.Body.Bytes(), &submitResp)
+	if err := json.Unmarshal(submitW.Body.Bytes(), &submitResp); err != nil {
+		t.Fatalf("failed to unmarshal submit response: %v", err)
+	}
 
 	// Now get the job
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/submissions/"+submitResp.JobID.String(), nil)

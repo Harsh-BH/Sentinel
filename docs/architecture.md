@@ -222,22 +222,22 @@ worker/internal/
 
 ### Defense in Depth
 
-Sentinel employs **7 layers of isolation** to contain untrusted code:
+Sentinel is designed for **7 layers of isolation** to contain untrusted code. **6 are currently active**; Layer 4 (seccomp-BPF) is authored but **not yet enforced** — its policy is commented out in `sandbox/nsjail/*.cfg` pending a kafel syscall-table audit (see [design doc 0001](design/0001-sandbox-security.md)):
 
 ```
-Layer 7: │ Application │  Input validation, size limits, rate limiting
-         ├─────────────┤
-Layer 6: │ Kubernetes   │  Network policies (deny-all default), pod security
-         ├─────────────┤
-Layer 5: │ Container    │  Read-only rootfs, non-root user, drop capabilities
-         ├─────────────┤
-Layer 4: │ Seccomp-BPF  │  Kafel policies: allowlisted syscalls only
-         ├─────────────┤
-Layer 3: │ Cgroups v2   │  Memory (256MB), PIDs (64), CPU (1 core)
-         ├─────────────┤
-Layer 2: │ Namespaces   │  PID, NET, MNT, UTS, IPC, USER, CGROUP
-         ├─────────────┤
-Layer 1: │ pivot_root   │  Minimal rootfs, no host filesystem access
+Layer 7: │ Application  │  Input validation, size limits, rate limiting          [active]
+         ├──────────────┤
+Layer 6: │ Kubernetes   │  Network policies (deny-all default), pod security     [active]
+         ├──────────────┤
+Layer 5: │ Container    │  Read-only rootfs, non-root user, drop capabilities    [active]
+         ├──────────────┤
+Layer 4: │ Seccomp-BPF  │  Kafel policies: allowlisted syscalls only    [PLANNED — disabled]
+         ├──────────────┤
+Layer 3: │ Cgroups v2   │  Memory (256MB), PIDs (64), CPU (1 core)               [active]
+         ├──────────────┤
+Layer 2: │ Namespaces   │  PID, NET, MNT, UTS, IPC, USER, CGROUP                 [active]
+         ├──────────────┤
+Layer 1: │ pivot_root   │  Minimal rootfs, no host filesystem access            [active]
 ```
 
 ### nsjail Sandbox Details
@@ -248,8 +248,8 @@ Layer 1: │ pivot_root   │  Minimal rootfs, no host filesystem access
 - All host paths are inaccessible
 
 **Network namespace**:
-- Empty network namespace (no `lo`, no `eth0`)
-- All socket syscalls blocked by seccomp
+- Empty network namespace (no `lo`, no `eth0`) — this is what enforces no-network today
+- Socket syscalls would additionally be blocked by seccomp once the policy is enforced (see below); until then, an unreachable empty netns is the guarantee
 - DNS resolution impossible
 
 **PID namespace**:
@@ -257,7 +257,7 @@ Layer 1: │ pivot_root   │  Minimal rootfs, no host filesystem access
 - Cannot signal or inspect host processes
 - Fork bomb limited by `cgroup_pids_max: 64`
 
-**Seccomp-BPF (Kafel DSL)**:
+**Seccomp-BPF (Kafel DSL)** — *authored but not yet enforced; the policy below is the intended allowlist, currently commented out in the nsjail configs*:
 ```
 // Python policy (simplified)
 POLICY python {
@@ -277,9 +277,9 @@ POLICY python {
 |--------|-----------|-------------|
 | Arbitrary code execution | nsjail sandbox with all 7 layers | `scripts/security-audit.sh` |
 | Fork bomb / resource exhaustion | Cgroups v2 PID + memory + CPU limits | Security audit Test 4a-4e |
-| Network exfiltration | Empty network namespace + seccomp socket block | Security audit Test 3a-3d |
+| Network exfiltration | Empty network namespace (active); seccomp socket block planned | Security audit Test 3a-3d |
 | Filesystem escape | pivot_root + read-only mounts + no host paths | Security audit Test 2a-2e |
-| Privilege escalation | User namespace (non-root), seccomp blocks setuid/mount/ptrace | Security audit Test 6a-6d |
+| Privilege escalation | User namespace (non-root, active); seccomp setuid/mount/ptrace block planned | Security audit Test 6a-6d |
 | Denial of service | Rate limiting, KEDA auto-scaling, queue-based backpressure | Load test (`scripts/load-test.js`) |
 | Replay attacks | Redis idempotency locks (ZADD NX) | Integration tests |
 

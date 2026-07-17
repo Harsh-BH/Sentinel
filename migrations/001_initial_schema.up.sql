@@ -21,8 +21,11 @@ CREATE TYPE execution_status AS ENUM (
 CREATE TYPE language AS ENUM ('python', 'cpp');
 
 -- Main execution jobs table (partitioned by created_at)
+-- The primary key of a partitioned table must include every partition-key
+-- column, so it is (job_id, created_at) rather than job_id alone. job_id is
+-- a UUID and remains effectively unique on its own.
 CREATE TABLE execution_jobs (
-    job_id          UUID PRIMARY KEY,
+    job_id          UUID NOT NULL,
     language        language NOT NULL,
     source_code     TEXT NOT NULL,
     stdin           TEXT DEFAULT '',
@@ -35,7 +38,8 @@ CREATE TABLE execution_jobs (
     time_limit_ms   INT NOT NULL DEFAULT 5000,
     memory_limit_kb INT NOT NULL DEFAULT 262144,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (job_id, created_at)
 ) PARTITION BY RANGE (created_at);
 
 -- Initial partition: Q1 2026

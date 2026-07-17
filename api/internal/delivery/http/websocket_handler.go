@@ -71,15 +71,14 @@ func (h *WebSocketHandler) Stream(c *gin.Context) {
 		h.logger.Error("WebSocket upgrade failed", zap.Error(err))
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	h.logger.Debug("WebSocket connection opened", zap.String("job_id", idStr))
 
 	// Configure connection
 	conn.SetReadLimit(wsMaxMessageSize)
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(wsPongTimeout + wsPingInterval))
-		return nil
+		return conn.SetReadDeadline(time.Now().Add(wsPongTimeout + wsPingInterval))
 	})
 
 	// Read pump: consume messages from client (just to detect disconnection)
@@ -114,12 +113,12 @@ func (h *WebSocketHandler) Stream(c *gin.Context) {
 
 		case <-maxTimer.C:
 			h.logger.Debug("WebSocket max duration exceeded, closing", zap.String("job_id", idStr))
-			conn.WriteMessage(websocket.CloseMessage,
+			_ = conn.WriteMessage(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "max connection duration exceeded"))
 			return
 
 		case <-pingTicker.C:
-			conn.SetWriteDeadline(time.Now().Add(wsPongTimeout))
+			_ = conn.SetWriteDeadline(time.Now().Add(wsPongTimeout))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				h.logger.Debug("WebSocket ping failed", zap.Error(err))
 				return
@@ -128,13 +127,13 @@ func (h *WebSocketHandler) Stream(c *gin.Context) {
 		case <-pollTicker.C:
 			job, err := h.getJobUC.Execute(c.Request.Context(), id)
 			if err != nil {
-				conn.WriteJSON(gin.H{"error": "Job not found"})
+				_ = conn.WriteJSON(gin.H{"error": "Job not found"})
 				return
 			}
 
 			// Only send updates when status changes (avoid flooding)
 			if job.Status != lastStatus {
-				conn.SetWriteDeadline(time.Now().Add(wsPongTimeout))
+				_ = conn.SetWriteDeadline(time.Now().Add(wsPongTimeout))
 				if err := conn.WriteJSON(job); err != nil {
 					h.logger.Debug("WebSocket write failed", zap.Error(err))
 					return
@@ -145,8 +144,8 @@ func (h *WebSocketHandler) Stream(c *gin.Context) {
 			// Stop streaming once the job reaches a terminal state
 			if job.Status.IsTerminal() {
 				// Send final state and close gracefully
-				conn.WriteJSON(job)
-				conn.WriteMessage(websocket.CloseMessage,
+				_ = conn.WriteJSON(job)
+				_ = conn.WriteMessage(websocket.CloseMessage,
 					websocket.FormatCloseMessage(websocket.CloseNormalClosure, "job completed"))
 				h.logger.Debug("Job reached terminal state, closing WebSocket",
 					zap.String("job_id", idStr),

@@ -196,7 +196,7 @@ func (c *Consumer) consume(ctx context.Context) error {
 					zap.Error(err),
 					zap.String("body", string(delivery.Body)),
 				)
-				delivery.Nack(false, false) // reject → DLQ
+				_ = delivery.Nack(false, false) // reject → DLQ
 				continue
 			}
 
@@ -225,7 +225,7 @@ func (c *Consumer) consume(ctx context.Context) error {
 			case c.jobs <- msg:
 			case <-ctx.Done():
 				// Shutting down — nack so the message is requeued.
-				delivery.Nack(false, true)
+				_ = delivery.Nack(false, true)
 				return nil
 			}
 		}

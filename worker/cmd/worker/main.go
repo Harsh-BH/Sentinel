@@ -27,7 +27,7 @@ import (
 func main() {
 	// Initialize logger
 	logger, _ := zap.NewProduction()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	logger.Info("Starting Sentinel Execution Worker")
 
@@ -116,7 +116,7 @@ func main() {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	})
 	metricsSrv.Handler = mux
 

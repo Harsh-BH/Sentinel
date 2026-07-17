@@ -124,6 +124,42 @@ func TestPool_GracefulShutdown(t *testing.T) {
 	}
 }
 
+// Test: a panic during execution requeues the in-flight message and the pool
+// relaunches the worker so capacity is preserved and later jobs still run.
+func TestPool_PanicRequeuesAndRelaunches(t *testing.T) {
+	var panicOnce atomic.Bool
+	exec := &mock.Executor{
+		ExecuteFn: func(ctx context.Context, req *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
+			// Panic only for the very first job; subsequent jobs succeed.
+			if panicOnce.CompareAndSwap(false, true) {
+				panic("boom")
+			}
+			return &domain.ExecutionResult{Status: domain.StatusSuccess}, nil
+		},
+	}
+	ch, wp, cancel := newTestPool(t, 1, exec)
+
+	var acked, nacked atomic.Int32
+
+	// First job panics → should be NACKed with requeue.
+	sendJob(ch, &acked, &nacked)
+	time.Sleep(100 * time.Millisecond)
+
+	// A second job proves the (single) worker was relaunched and still processes.
+	sendJob(ch, &acked, &nacked)
+	time.Sleep(200 * time.Millisecond)
+
+	cancel()
+	wp.Stop()
+
+	if nacked.Load() != 1 {
+		t.Errorf("expected 1 NACK (requeue) from panic, got %d", nacked.Load())
+	}
+	if acked.Load() != 1 {
+		t.Errorf("expected 1 ACK from the post-relaunch job, got %d", acked.Load())
+	}
+}
+
 // Test: pool handles duplicate jobs (ACKs them, not NACKs).
 func TestPool_DuplicateIsAcked(t *testing.T) {
 	exec := &mock.Executor{}
