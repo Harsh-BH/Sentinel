@@ -22,10 +22,14 @@ func init() {
 
 func setupTestRouter() (*gin.Engine, *mockrepo.MockJobRepository, *mockpub.MockPublisher) {
 	repo := mockrepo.NewMockJobRepository()
+	outbox := mockrepo.NewMockOutboxRepository().BackedBy(repo)
 	pub := mockpub.NewMockPublisher()
 	logger := zap.NewNop()
 
-	submitUC := usecase.NewSubmitJobUsecase(repo, pub, logger)
+	// Submissions go through the outbox, reads through the job repository — and the
+	// outbox is backed by that same repository, because in production both writes
+	// land in one table inside one transaction.
+	submitUC := usecase.NewSubmitJobUsecase(outbox, pub, logger)
 	getJobUC := usecase.NewGetJobUsecase(repo, logger)
 
 	router := gin.New()

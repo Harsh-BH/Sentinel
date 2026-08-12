@@ -24,11 +24,12 @@ const (
 
 // Consumer listens to RabbitMQ and dispatches JobMessage (with ACK callbacks) to a channel.
 type Consumer struct {
-	url     string
-	conn    *amqplib.Connection
-	channel *amqplib.Channel
-	logger  *zap.Logger
-	jobs    chan<- *domain.JobMessage
+	url      string
+	prefetch int
+	conn     *amqplib.Connection
+	channel  *amqplib.Channel
+	logger   *zap.Logger
+	jobs     chan<- *domain.JobMessage
 
 	mu      sync.Mutex
 	closed  bool
@@ -36,15 +37,22 @@ type Consumer struct {
 }
 
 // NewConsumer creates a new RabbitMQ consumer.
-// Unlike Phase 0, the consumer does NOT auto-ACK after dispatch.
-// Instead, it wraps each delivery in a JobMessage with Ack/Nack callbacks
-// that the worker pool calls after execution completes.
-func NewConsumer(url string, jobs chan<- *domain.JobMessage, logger *zap.Logger) (*Consumer, error) {
+//
+// The consumer does NOT auto-ACK after dispatch. It wraps each delivery in a
+// JobMessage with Ack/Nack callbacks that the worker pool calls after execution
+// completes, so a crashed worker's message is redelivered rather than lost.
+//
+// prefetch must be the worker pool size — see connect().
+func NewConsumer(url string, jobs chan<- *domain.JobMessage, prefetch int, logger *zap.Logger) (*Consumer, error) {
+	if prefetch < 1 {
+		prefetch = 1
+	}
 	c := &Consumer{
-		url:     url,
-		logger:  logger,
-		jobs:    jobs,
-		closeCh: make(chan struct{}),
+		url:      url,
+		prefetch: prefetch,
+		logger:   logger,
+		jobs:     jobs,
+		closeCh:  make(chan struct{}),
 	}
 
 	if err := c.connect(); err != nil {
@@ -54,7 +62,7 @@ func NewConsumer(url string, jobs chan<- *domain.JobMessage, logger *zap.Logger)
 	return c, nil
 }
 
-// connect establishes the AMQP connection and channel with prefetch=1.
+// connect establishes the AMQP connection and channel.
 func (c *Consumer) connect() error {
 	conn, err := amqplib.Dial(c.url)
 	if err != nil {
@@ -67,8 +75,15 @@ func (c *Consumer) connect() error {
 		return fmt.Errorf("amqp channel: %w", err)
 	}
 
-	// Set prefetch to 1: only deliver one unacknowledged message per consumer.
-	if err := ch.Qos(1, 0, false); err != nil {
+	// Prefetch caps how many messages the broker will hand this consumer before
+	// it acks. Because ack happens only AFTER execution, prefetch is also the
+	// real concurrency limit of the whole process.
+	//
+	// This used to be hardcoded to 1 while the pool ran WORKER_POOL_SIZE
+	// goroutines, so the pool, the buffered channel and the pool-size config were
+	// all inert — the pod executed strictly one job at a time. Prefetch must
+	// track pool size for the pool to mean anything.
+	if err := ch.Qos(c.prefetch, 0, false); err != nil {
 		ch.Close()
 		conn.Close()
 		return fmt.Errorf("amqp qos: %w", err)
@@ -209,13 +224,25 @@ func (c *Consumer) consume(ctx context.Context) error {
 			tag := delivery.DeliveryTag
 			localCh := ch
 
+			// A delivery may be settled from two places: the normal path in
+			// processJob, and the panic handler in the worker pool. sync.Once makes
+			// the second call a silent no-op instead of an AMQP protocol error, so
+			// the panic handler can requeue unconditionally without having to know
+			// whether processJob already got there.
+			var once sync.Once
+			settle := func(fn func() error) error {
+				var err error
+				once.Do(func() { err = fn() })
+				return err
+			}
+
 			msg := &domain.JobMessage{
 				Job: &job,
 				Ack: func() error {
-					return localCh.Ack(tag, false)
+					return settle(func() error { return localCh.Ack(tag, false) })
 				},
 				Nack: func(requeue bool) error {
-					return localCh.Nack(tag, false, requeue)
+					return settle(func() error { return localCh.Nack(tag, false, requeue) })
 				},
 			}
 

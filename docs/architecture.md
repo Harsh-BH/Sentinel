@@ -317,11 +317,17 @@ POLICY python {
 
 ### Capacity Planning
 
-| Workers | Pool Size | Concurrent Executions | Sustained Throughput (est.) |
-|---------|-----------|----------------------|---------------------------|
-| 2 | 4 | 8 | ~100 submissions/min |
-| 10 | 4 | 40 | ~500 submissions/min |
-| 50 | 4 | 200 | ~2500 submissions/min |
+Concurrency is `replicas × pool_size` **only while AMQP prefetch equals pool_size** — see [design doc 0003](./design/0003-scaling-architecture.md).
+
+| Workers | Pool Size | Concurrent Executions | Throughput at 1s/job | Throughput at 5s/job |
+|---------|-----------|----------------------|----------------------|----------------------|
+| 2 | 4 | 8 | 8/s = 480/min | 1.6/s = 96/min |
+| 10 | 4 | 40 | 40/s = 2400/min | 8/s = 480/min |
+| 50 | 4 | 200 | 200/s = 12000/min | 40/s = 2400/min |
+
+The arithmetic is just `concurrency ÷ mean_job_duration`; the two columns exist because a single throughput figure is meaningless without stating the job duration it assumes.
+
+**These are derived, not measured.** The only measured concurrency figure is local: 4 concurrent 3-second jobs on one pod complete in ~3s wall clock (`scripts/integration-test.sh`). Nothing in this table has been load-tested at scale.
 
 ---
 

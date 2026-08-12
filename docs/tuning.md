@@ -117,8 +117,8 @@ max_connections = (API_replicas × pool_size) + (Worker_replicas × 2) + 10  # o
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| Worker prefetch count | `1` (in consumer code) | Messages fetched ahead per consumer |
-| Channel multiplexing | 1 channel per worker | Each worker goroutine uses its own channel |
+| Worker prefetch count | `WORKER_POOL_SIZE` (set in consumer code) | Unacked messages allowed per consumer — and therefore the real per-pod concurrency limit |
+| Channel multiplexing | 1 connection, 1 channel, 1 consumer per worker **process** | All pool goroutines are fed from that single consumer via a Go channel |
 
 ### Prefetch Count
 
@@ -126,11 +126,11 @@ The prefetch count controls how many messages each worker goroutine will buffer:
 
 | Prefetch | Behavior | Use When |
 |----------|----------|----------|
-| 1 | Fair dispatch, higher latency | Execution time varies (default) |
-| 5 | Batch dispatch, lower overhead | Uniform fast executions |
-| 10+ | High throughput, poor fairness | Only if executions are very fast (<100ms) |
+| 1 | **Serialises the pod.** One unacked message at a time, and ACK is after execution, so only one job ever runs | Never, unless pool_size is also 1 |
+| `= pool_size` | Every pool goroutine can be busy; no goroutine starves | Default |
+| `> pool_size` | Messages sit in the local buffer instead of staying available to other pods, delaying rebalancing | Only for very fast, uniform jobs |
 
-**Sentinel default**: Prefetch 1 is optimal because execution times vary widely (100ms Python print vs 10s C++ compile). Higher prefetch causes head-of-line blocking.
+**Sentinel default**: prefetch is set to `WORKER_POOL_SIZE`. Because ACK happens after the result is persisted (never before), prefetch is not a latency knob — it is the concurrency limit. Setting it to 1 does not improve fairness; it idles `pool_size - 1` goroutines.
 
 ### Queue Tuning
 

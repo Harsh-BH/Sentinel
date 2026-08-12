@@ -141,12 +141,53 @@ jobs:
         run: psql -h localhost -U sentinel -d sentinel -v ON_ERROR_STOP=1 -f migrations/001_initial_schema.down.sql
 
   # ═══════════════════════════════════════════════════════════
+  # Manifests — render Kustomize, and fail on schema drift
+  # ═══════════════════════════════════════════════════════════
+  # This job exists because the k8s manifests were broken for a long time with
+  # nothing to catch it: ConfigMap keys did not match the env vars the services
+  # actually read, and a hand-copied inline schema had drifted into invalid DDL.
+  # Both are the kind of mistake only a render + diff catches.
+  manifests:
+    name: Manifests (Kustomize)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kustomize
+        run: |
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kustomize
+          kustomize version
+      - name: Fail if the k8s schema copy drifted from migrations/
+        run: make k8s-verify-schema
+      - name: Render manifests
+        run: kustomize build infra/k8s/ > /tmp/rendered.yaml
+      - name: Assert config keys match what the services read
+        run: |
+          set -euo pipefail
+          # Every WORKER_*/API_* key the code reads must be present in the
+          # rendered ConfigMaps, or the service silently falls back to defaults.
+          for key in API_PORT GIN_MODE API_RATE_LIMIT API_ALLOWED_ORIGINS \
+                     API_TRUSTED_PROXIES WORKER_POOL_SIZE WORKER_METRICS_PORT \
+                     WORKER_DRAIN_TIMEOUT WORKER_NSJAIL_PATH WORKER_SANDBOX_CONFIG_DIR; do
+            grep -q "  ${key}:" /tmp/rendered.yaml || { echo "MISSING config key: ${key}"; exit 1; }
+          done
+          # The sandbox config path must be absolute; a relative path resolves
+          # against the container CWD (/) and does not exist.
+          grep -q 'WORKER_SANDBOX_CONFIG_DIR: /' /tmp/rendered.yaml \
+            || { echo "WORKER_SANDBOX_CONFIG_DIR must be an absolute path"; exit 1; }
+          # Liveness probes must not point at the dependency-checking endpoint.
+          if grep -A1 'livenessProbe:' /tmp/rendered.yaml | grep -qE 'path: (/api/v1/health|/healthz|/api/v1/readyz)'; then
+            echo "livenessProbe must use /livez, not a dependency check"; exit 1
+          fi
+          echo "manifest assertions passed"
+
+  # ═══════════════════════════════════════════════════════════
   # Docker Build & Push to GHCR (main branch only)
   # ═══════════════════════════════════════════════════════════
   build-images:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
-    needs: [go, lint-go, frontend, migrations]
+    needs: [go, lint-go, frontend, migrations, manifests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       packages: write

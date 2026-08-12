@@ -4,18 +4,19 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/Harsh-BH/Sentinel/worker/internal/domain"
+	"github.com/Harsh-BH/Sentinel/worker/internal/repository"
 	"github.com/Harsh-BH/Sentinel/worker/internal/repository/mock"
 	"github.com/Harsh-BH/Sentinel/worker/internal/usecase"
 )
 
-func newTestUsecase(repo *mock.JobRepository, idem *mock.IdempotencyStore, exec *mock.Executor) *usecase.ExecuteJobUsecase {
-	logger := zap.NewNop()
-	return usecase.NewExecuteJobUsecase(repo, idem, exec, logger)
+func newTestUsecase(repo *mock.JobRepository, exec *mock.Executor) *usecase.ExecuteJobUsecase {
+	return usecase.NewExecuteJobUsecase(repo, exec, zap.NewNop())
 }
 
 func newTestJob() *domain.Job {
@@ -23,260 +24,215 @@ func newTestJob() *domain.Job {
 		JobID:         uuid.New(),
 		Language:      domain.LangPython,
 		SourceCode:    "print('hello')",
-		Stdin:         "",
 		TimeLimitMs:   5000,
 		MemoryLimitKB: 262144,
+		CreatedAt:     time.Now().UTC(),
 	}
 }
 
 // Test: successful python execution end-to-end.
 func TestExecute_Success_Python(t *testing.T) {
 	repo := &mock.JobRepository{}
-	idem := &mock.IdempotencyStore{}
-	exec := &mock.Executor{
-		ExecuteFn: func(ctx context.Context, req *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
-			return &domain.ExecutionResult{
-				Status:     domain.StatusSuccess,
-				Stdout:     "hello\n",
-				ExitCode:   0,
-				TimeUsedMs: 50,
-			}, nil
-		},
-	}
+	exec := &mock.Executor{}
+	uc := newTestUsecase(repo, exec)
 
-	uc := newTestUsecase(repo, idem, exec)
-	job := newTestJob()
-
-	isDup, err := uc.Execute(context.Background(), job)
+	outcome, err := uc.Execute(context.Background(), newTestJob())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if isDup {
-		t.Fatal("expected not duplicate")
+	if outcome != usecase.OutcomeExecuted {
+		t.Errorf("expected OutcomeExecuted, got %v", outcome)
 	}
-
-	// Verify status was updated to RUNNING (Python).
-	if len(repo.StatusUpdates) != 1 {
-		t.Fatalf("expected 1 status update, got %d", len(repo.StatusUpdates))
+	if repo.ClaimCallCount() != 1 {
+		t.Errorf("expected 1 claim, got %d", repo.ClaimCallCount())
 	}
-	if repo.StatusUpdates[0].Status != domain.StatusRunning {
-		t.Errorf("expected RUNNING status, got %s", repo.StatusUpdates[0].Status)
+	if repo.Claims[0].Status != domain.StatusRunning {
+		t.Errorf("python should claim as RUNNING, got %s", repo.Claims[0].Status)
 	}
-
-	// Verify result was stored.
-	if len(repo.Results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(repo.Results))
-	}
-	if repo.Results[0].Result.Status != domain.StatusSuccess {
-		t.Errorf("expected SUCCESS result, got %s", repo.Results[0].Result.Status)
-	}
-
-	// Verify lock was acquired and released.
-	if len(idem.AcquireCalls) != 1 {
-		t.Fatalf("expected 1 acquire call, got %d", len(idem.AcquireCalls))
-	}
-	if len(idem.ReleaseCalls) != 1 {
-		t.Fatalf("expected 1 release call, got %d", len(idem.ReleaseCalls))
+	if repo.ResultCount() != 1 {
+		t.Errorf("expected 1 result write, got %d", repo.ResultCount())
 	}
 }
 
-// Test: C++ job sets initial status to COMPILING.
-func TestExecute_Success_Cpp(t *testing.T) {
+// Test: C++ claims as COMPILING and its lease covers the compile pass too.
+func TestExecute_Cpp_ClaimsCompilingWithLongerLease(t *testing.T) {
 	repo := &mock.JobRepository{}
-	idem := &mock.IdempotencyStore{}
-	exec := &mock.Executor{
-		ExecuteFn: func(ctx context.Context, req *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
-			return &domain.ExecutionResult{
-				Status:     domain.StatusSuccess,
-				Stdout:     "42\n",
-				ExitCode:   0,
-				TimeUsedMs: 120,
-			}, nil
-		},
-	}
+	exec := &mock.Executor{}
+	uc := newTestUsecase(repo, exec)
 
-	uc := newTestUsecase(repo, idem, exec)
 	job := newTestJob()
 	job.Language = domain.LangCpp
-	job.SourceCode = "#include <cstdio>\nint main(){printf(\"42\\n\");}"
 
-	isDup, err := uc.Execute(context.Background(), job)
-	if err != nil {
+	if _, err := uc.Execute(context.Background(), job); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if isDup {
-		t.Fatal("expected not duplicate")
+	if repo.Claims[0].Status != domain.StatusCompiling {
+		t.Errorf("cpp should claim as COMPILING, got %s", repo.Claims[0].Status)
 	}
 
-	if repo.StatusUpdates[0].Status != domain.StatusCompiling {
-		t.Errorf("expected COMPILING status for C++, got %s", repo.StatusUpdates[0].Status)
+	// The lease must cover job runtime + compile budget, otherwise a slow compile
+	// lets the lease expire and the reaper re-submits a job that is still running.
+	minLease := time.Duration(job.TimeLimitMs)*time.Millisecond + domain.CompileTimeLimit
+	if repo.Claims[0].Lease <= minLease {
+		t.Errorf("cpp lease %s must exceed runtime+compile budget %s", repo.Claims[0].Lease, minLease)
 	}
 }
 
-// Test: duplicate message is detected and skipped.
-func TestExecute_Duplicate(t *testing.T) {
-	repo := &mock.JobRepository{}
-	idem := &mock.IdempotencyStore{
-		AcquireLockFn: func(ctx context.Context, jobID uuid.UUID) (bool, error) {
-			return false, nil // lock not acquired = duplicate
+// Test: an already-terminal job is a duplicate — ack it, never re-run it.
+func TestExecute_DuplicateTerminal_DoesNotExecute(t *testing.T) {
+	repo := &mock.JobRepository{
+		ClaimFn: func(context.Context, uuid.UUID, time.Time, domain.ExecutionStatus, time.Duration) (repository.ClaimOutcome, error) {
+			return repository.ClaimTerminal, nil
 		},
 	}
 	exec := &mock.Executor{}
+	uc := newTestUsecase(repo, exec)
 
-	uc := newTestUsecase(repo, idem, exec)
-	job := newTestJob()
-
-	isDup, err := uc.Execute(context.Background(), job)
+	outcome, err := uc.Execute(context.Background(), newTestJob())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !isDup {
-		t.Fatal("expected duplicate")
+	if outcome != usecase.OutcomeDuplicate {
+		t.Errorf("expected OutcomeDuplicate, got %v", outcome)
 	}
-
-	// Verify no status update or execution happened.
-	if len(repo.StatusUpdates) != 0 {
-		t.Errorf("expected 0 status updates, got %d", len(repo.StatusUpdates))
+	if exec.ExecuteCallCount() != 0 {
+		t.Error("a terminal job must not be executed again")
 	}
-	if len(exec.ExecuteCalls) != 0 {
-		t.Errorf("expected 0 execute calls, got %d", len(exec.ExecuteCalls))
+	if repo.ResultCount() != 0 {
+		t.Error("a terminal job must not have its result overwritten")
 	}
 }
 
-// Test: idempotency lock acquisition fails.
-func TestExecute_LockError(t *testing.T) {
-	repo := &mock.JobRepository{}
-	idem := &mock.IdempotencyStore{
-		AcquireLockFn: func(ctx context.Context, jobID uuid.UUID) (bool, error) {
-			return false, errors.New("redis connection refused")
+// Test: a job leased by a live worker is skipped, not executed.
+func TestExecute_LeasedByOther_DoesNotExecute(t *testing.T) {
+	repo := &mock.JobRepository{
+		ClaimFn: func(context.Context, uuid.UUID, time.Time, domain.ExecutionStatus, time.Duration) (repository.ClaimOutcome, error) {
+			return repository.ClaimLeased, nil
 		},
 	}
 	exec := &mock.Executor{}
+	uc := newTestUsecase(repo, exec)
 
-	uc := newTestUsecase(repo, idem, exec)
-	job := newTestJob()
-
-	_, err := uc.Execute(context.Background(), job)
-	if err == nil {
-		t.Fatal("expected error")
+	outcome, _ := uc.Execute(context.Background(), newTestJob())
+	if outcome != usecase.OutcomeDuplicate {
+		t.Errorf("expected OutcomeDuplicate, got %v", outcome)
 	}
-	if err.Error() != "redis connection refused" {
-		t.Errorf("unexpected error: %v", err)
+	if exec.ExecuteCallCount() != 0 {
+		t.Error("a leased job must not be executed concurrently")
 	}
 }
 
-// Test: sandbox execution returns infrastructure error.
-func TestExecute_SandboxFailure(t *testing.T) {
+// Test: a missing job row is poison — dead-letter it rather than retrying forever.
+func TestExecute_NotFound_IsPoison(t *testing.T) {
+	repo := &mock.JobRepository{
+		ClaimFn: func(context.Context, uuid.UUID, time.Time, domain.ExecutionStatus, time.Duration) (repository.ClaimOutcome, error) {
+			return repository.ClaimNotFound, nil
+		},
+	}
+	uc := newTestUsecase(repo, &mock.Executor{})
+
+	outcome, _ := uc.Execute(context.Background(), newTestJob())
+	if outcome != usecase.OutcomePoison {
+		t.Errorf("expected OutcomePoison, got %v", outcome)
+	}
+}
+
+// Test: a claim error is retryable, so the reaper gets a chance to re-submit.
+func TestExecute_ClaimError_IsRetryable(t *testing.T) {
+	dbErr := errors.New("connection refused")
+	repo := &mock.JobRepository{
+		ClaimFn: func(context.Context, uuid.UUID, time.Time, domain.ExecutionStatus, time.Duration) (repository.ClaimOutcome, error) {
+			return repository.ClaimNotFound, dbErr
+		},
+	}
+	uc := newTestUsecase(repo, &mock.Executor{})
+
+	outcome, err := uc.Execute(context.Background(), newTestJob())
+	if outcome != usecase.OutcomeRetryable {
+		t.Errorf("expected OutcomeRetryable, got %v", outcome)
+	}
+	if !errors.Is(err, dbErr) {
+		t.Errorf("expected the underlying error to propagate, got %v", err)
+	}
+}
+
+// Test: a sandbox failure marks the job INTERNAL_ERROR instead of leaving it
+// stuck in RUNNING until the reaper notices.
+func TestExecute_SandboxFailure_MarksInternalError(t *testing.T) {
 	repo := &mock.JobRepository{}
-	idem := &mock.IdempotencyStore{}
 	exec := &mock.Executor{
-		ExecuteFn: func(ctx context.Context, req *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
-			return nil, errors.New("nsjail binary not found")
+		ExecuteFn: func(context.Context, *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
+			return nil, errors.New("nsjail exploded")
 		},
 	}
+	uc := newTestUsecase(repo, exec)
 
-	uc := newTestUsecase(repo, idem, exec)
-	job := newTestJob()
-
-	isDup, err := uc.Execute(context.Background(), job)
+	outcome, err := uc.Execute(context.Background(), newTestJob())
+	if outcome != usecase.OutcomeRetryable {
+		t.Errorf("expected OutcomeRetryable, got %v", outcome)
+	}
 	if err == nil {
-		t.Fatal("expected error from sandbox failure")
+		t.Error("expected an error")
 	}
-	if isDup {
-		t.Fatal("expected not duplicate")
-	}
-
-	// Should have set initial status AND then INTERNAL_ERROR.
-	if len(repo.StatusUpdates) != 2 {
-		t.Fatalf("expected 2 status updates, got %d", len(repo.StatusUpdates))
-	}
-	if repo.StatusUpdates[1].Status != domain.StatusInternalError {
-		t.Errorf("expected INTERNAL_ERROR, got %s", repo.StatusUpdates[1].Status)
+	if len(repo.StatusUpdates) != 1 || repo.StatusUpdates[0].Status != domain.StatusInternalError {
+		t.Errorf("expected INTERNAL_ERROR status write, got %+v", repo.StatusUpdates)
 	}
 }
 
-// Test: UpdateStatus DB failure.
-func TestExecute_DBUpdateStatusError(t *testing.T) {
+// Test: losing the result race is NOT an error. The guard did its job.
+func TestExecute_ResultRace_IsDuplicateNotError(t *testing.T) {
 	repo := &mock.JobRepository{
-		UpdateStatusFn: func(ctx context.Context, id uuid.UUID, status domain.ExecutionStatus) error {
-			return errors.New("connection refused")
+		SetResultFn: func(context.Context, uuid.UUID, time.Time, *domain.ExecutionResult) error {
+			return repository.ErrAlreadyTerminal
 		},
 	}
-	idem := &mock.IdempotencyStore{}
-	exec := &mock.Executor{}
+	uc := newTestUsecase(repo, &mock.Executor{})
 
-	uc := newTestUsecase(repo, idem, exec)
-	job := newTestJob()
-
-	_, err := uc.Execute(context.Background(), job)
-	if err == nil {
-		t.Fatal("expected error from DB failure")
+	outcome, err := uc.Execute(context.Background(), newTestJob())
+	if err != nil {
+		t.Fatalf("a lost result race must not surface as an error: %v", err)
+	}
+	if outcome != usecase.OutcomeDuplicate {
+		t.Errorf("expected OutcomeDuplicate, got %v", outcome)
 	}
 }
 
-// Test: SetResult DB failure.
-func TestExecute_DBSetResultError(t *testing.T) {
+// Test: a result-write infrastructure error IS retryable.
+func TestExecute_ResultWriteError_IsRetryable(t *testing.T) {
 	repo := &mock.JobRepository{
-		SetResultFn: func(ctx context.Context, id uuid.UUID, result *domain.ExecutionResult) error {
+		SetResultFn: func(context.Context, uuid.UUID, time.Time, *domain.ExecutionResult) error {
 			return errors.New("disk full")
 		},
 	}
-	idem := &mock.IdempotencyStore{}
-	exec := &mock.Executor{}
+	uc := newTestUsecase(repo, &mock.Executor{})
 
-	uc := newTestUsecase(repo, idem, exec)
-	job := newTestJob()
-
-	_, err := uc.Execute(context.Background(), job)
-	if err == nil {
-		t.Fatal("expected error from SetResult failure")
+	outcome, err := uc.Execute(context.Background(), newTestJob())
+	if outcome != usecase.OutcomeRetryable {
+		t.Errorf("expected OutcomeRetryable, got %v", outcome)
 	}
-	if err.Error() != "disk full" {
-		t.Errorf("unexpected error: %v", err)
+	if err == nil {
+		t.Error("expected an error")
 	}
 }
 
-// Test: executor receives correct request fields.
-func TestExecute_CorrectRequestFields(t *testing.T) {
+// Test: the executor receives the job's real limits, not defaults.
+func TestExecute_PassesRequestFieldsThrough(t *testing.T) {
 	repo := &mock.JobRepository{}
-	idem := &mock.IdempotencyStore{}
 	exec := &mock.Executor{}
+	uc := newTestUsecase(repo, exec)
 
-	uc := newTestUsecase(repo, idem, exec)
-	job := &domain.Job{
-		JobID:         uuid.MustParse("01234567-89ab-cdef-0123-456789abcdef"),
-		Language:      domain.LangPython,
-		SourceCode:    "print(42)",
-		Stdin:         "input data",
-		TimeLimitMs:   3000,
-		MemoryLimitKB: 131072,
-	}
+	job := newTestJob()
+	job.SourceCode = "x = 1"
+	job.Stdin = "42\n"
+	job.TimeLimitMs = 1234
+	job.MemoryLimitKB = 65536
 
-	_, err := uc.Execute(context.Background(), job)
-	if err != nil {
+	if _, err := uc.Execute(context.Background(), job); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if len(exec.ExecuteCalls) != 1 {
-		t.Fatalf("expected 1 execute call, got %d", len(exec.ExecuteCalls))
-	}
-	req := exec.ExecuteCalls[0]
-	if req.JobID != job.JobID {
-		t.Errorf("job ID mismatch")
-	}
-	if req.Language != job.Language {
-		t.Errorf("language mismatch")
-	}
-	if req.SourceCode != job.SourceCode {
-		t.Errorf("source code mismatch")
-	}
-	if req.Stdin != job.Stdin {
-		t.Errorf("stdin mismatch")
-	}
-	if req.TimeLimitMs != job.TimeLimitMs {
-		t.Errorf("time limit mismatch")
-	}
-	if req.MemoryLimitKB != job.MemoryLimitKB {
-		t.Errorf("memory limit mismatch")
+	got := exec.ExecuteCalls[0]
+	if got.SourceCode != job.SourceCode || got.Stdin != job.Stdin ||
+		got.TimeLimitMs != job.TimeLimitMs || got.MemoryLimitKB != job.MemoryLimitKB {
+		t.Errorf("executor got %+v, want fields from %+v", got, job)
 	}
 }

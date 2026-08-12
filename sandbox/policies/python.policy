@@ -1,115 +1,99 @@
 /* =============================================================================
- * Kafel seccomp-bpf policy for Python 3.12 execution
+ * Kafel seccomp-bpf policy — Python 3 execution
  * Project Sentinel
- * 
- * This policy ALLOWLISTS specific syscalls needed by the Python interpreter.
- * Everything not explicitly allowed is KILLED.
+ *
+ * ALLOWLIST. Everything not named here is KILLed (see USE ... DEFAULT KILL at
+ * the bottom), so the interesting security property is what is *absent*.
+ *
+ * HOW THIS LIST WAS BUILT — not by guesswork. The syscalls CPython actually
+ * issues were captured with `strace -f` running a program that exercises stdin,
+ * file I/O, threading, json, random, math and time, then widened with a curated
+ * margin for paths that trace did not hit (signals, polling, subprocess).
+ *
+ * Why the previous version of this file never loaded: it listed `fstat`, which
+ * this build of kafel does not define, so nsjail failed with
+ * "Undefined identifier `fstat'" and seccomp was commented out entirely for
+ * months. `fstat` was not merely misnamed — modern glibc uses `newfstatat`, so
+ * the syscall was never needed at all. Two other names were also rejected:
+ * `futex_time64` (32-bit only, irrelevant on x86_64) and `uname`, which kafel
+ * spells `newuname` after the kernel's internal name.
+ *
+ * DELIBERATELY NOT ALLOWED — this is the point of the file:
+ *   socket, connect, bind, sendto, recvfrom  → no network syscall reaches the
+ *       kernel at all. Defence in depth behind the empty network namespace: even
+ *       if netns setup regressed, the syscall itself is unavailable.
+ *   ptrace, process_vm_readv, process_vm_writev → no debugging or cross-process
+ *       memory access.
+ *   mount, umount2, pivot_root, chroot, unshare, setns → no remapping the
+ *       filesystem and no attempt at namespace escape.
+ *   bpf, perf_event_open, io_uring_setup, userfaultfd → the kernel interfaces
+ *       most often used as exploit primitives.
+ *   init_module, finit_module, delete_module, kexec_load, reboot → no touching
+ *       the running kernel.
+ *   setuid, setgid, setreuid, capset → no privilege transitions.
+ *   clock_settime, settimeofday, adjtimex → no clock tampering.
+ *   keyctl, add_key, request_key → no kernel keyring access.
  * =============================================================================
  */
 
 POLICY python {
-  /* File I/O */
+  /* File and descriptor I/O. newfstatat/statx are the modern stat family;
+   * fstat/lstat/stat are legacy and unused by current glibc. */
   ALLOW {
-    read,
-    write,
-    openat,
-    close,
-    fstat,
-    newfstatat,
-    statx,
-    lseek,
-    lstat,
-    stat,
-    access,
-    faccessat,
-    faccessat2,
-    getcwd,
-    readlink,
-    readlinkat,
-    getdents64,
-    dup,
-    dup2,
-    dup3,
-    fcntl,
-    ioctl,
-    pipe,
-    pipe2
+    read, write, openat, close, lseek, pread64, pwrite64, readv, writev,
+    newfstatat, statx, fstatfs, statfs,
+    access, faccessat, faccessat2,
+    getcwd, readlink, readlinkat, getdents64,
+    dup, dup2, dup3, fcntl, ioctl, pipe, pipe2,
+    ftruncate, truncate, unlink, unlinkat, mkdir, mkdirat, rmdir,
+    rename, renameat, renameat2, chmod, fchmod, fchmodat, umask
   },
 
-  /* Memory management */
+  /* Memory management. The interpreter's allocator plus mmap-backed imports. */
   ALLOW {
-    brk,
-    mmap,
-    mprotect,
-    munmap,
-    mremap,
-    madvise
+    brk, mmap, mprotect, munmap, mremap, madvise, mlock, munlock, membarrier
   },
 
-  /* Process lifecycle */
+  /* Process lifecycle. clone/clone3 cover threading; fork/vfork/wait cover
+   * subprocess, which stays inside this sandbox and under cgroup_pids_max. */
   ALLOW {
-    execve,       /* needed for initial Python interpreter launch */
-    exit_group,
-    exit,
-    clone,        /* needed for Python threading */
-    clone3,
-    wait4,
-    getpid,
-    getppid,
-    gettid,
-    getuid,
-    getgid,
-    geteuid,
-    getegid,
-    getgroups,
-    setgroups
+    execve, execveat, exit, exit_group,
+    clone, clone3, fork, vfork, wait4, waitid,
+    getpid, getppid, gettid,
+    getuid, geteuid, getgid, getegid, getgroups,
+    getrusage, getrlimit, prlimit64, setrlimit, prctl
   },
 
-  /* Signals */
+  /* Signals. restart_syscall is load-bearing: when a signal interrupts a
+   * blocking call the kernel resumes it through restart_syscall, so omitting it
+   * kills any program that catches a signal mid-syscall. */
   ALLOW {
-    rt_sigaction,
-    rt_sigprocmask,
-    rt_sigreturn,
-    sigaltstack
+    rt_sigaction, rt_sigprocmask, rt_sigreturn, rt_sigtimedwait,
+    sigaltstack, tgkill, kill, restart_syscall
   },
 
-  /* Thread synchronization */
+  /* Thread synchronisation. */
   ALLOW {
-    futex,
-    set_tid_address,
-    set_robust_list,
-    get_robust_list,
-    rseq
+    futex, set_tid_address, set_robust_list, get_robust_list, rseq
   },
 
-  /* System information */
+  /* System information. newuname is kafel's name for uname. */
   ALLOW {
-    uname,
-    sysinfo,
-    arch_prctl,
-    prlimit64,
-    getrandom
+    newuname, sysinfo, arch_prctl, getrandom,
+    sched_yield, sched_getaffinity, sched_getparam, sched_getscheduler
   },
 
-  /* Time */
+  /* Time. These usually resolve through the vDSO without entering the kernel,
+   * but they fall back to real syscalls depending on the host clock source, so
+   * they must be allowed or timing code breaks unpredictably. */
   ALLOW {
-    clock_gettime,
-    clock_getres,
-    gettimeofday,
-    nanosleep,
-    clock_nanosleep
+    clock_gettime, clock_getres, clock_nanosleep, gettimeofday, nanosleep, time
   },
 
-  /* Misc */
+  /* Event loops and multiplexing — asyncio, selectors, subprocess plumbing. */
   ALLOW {
-    poll,
-    ppoll,
-    select,
-    pselect6,
-    epoll_create1,
-    epoll_ctl,
-    epoll_wait,
-    eventfd2
+    poll, ppoll, select, pselect6,
+    epoll_create1, epoll_ctl, epoll_wait, epoll_pwait, eventfd2
   }
 }
 

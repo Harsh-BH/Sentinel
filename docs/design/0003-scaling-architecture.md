@@ -12,9 +12,15 @@ Sentinel's load profile is bursty (think a programming class hitting submit at t
 Workers concurrency is structured at two levels:
 
 1. **Process-level (KEDA)** — `worker-deployment` replicas scale based on RabbitMQ queue depth.
-2. **Goroutine-level (worker pool)** — each pod runs `WORKER_POOL_SIZE` goroutines, each consuming with prefetch=1.
+2. **Goroutine-level (worker pool)** — each pod runs `WORKER_POOL_SIZE` goroutines fed from one AMQP consumer whose **prefetch equals the pool size**.
 
-Total in-flight executions at any time: `replicas × pool_size`. Default: `min=2 × pool_size=4 = 8` to `max=50 × pool_size=4 = 200`.
+   This is one consumer on one channel, not one per goroutine. Prefetch is set once, in `worker/internal/delivery/amqp/consumer.go`, and because ACK happens only after execution completes, **prefetch is the real concurrency ceiling of the process**. It must track pool size or the pool is inert.
+
+   > Historical note: prefetch was hardcoded to `1` while the pool ran 4 goroutines, so each pod executed strictly **one** job at a time and `WORKER_POOL_SIZE`, the buffered channel and the pool itself did nothing. The capacity figures below were 4x overstated for most of this project's life. Measured after the fix: 4 concurrent 3-second jobs complete in ~3s wall clock instead of ~12s.
+
+Total in-flight executions at any time: `replicas × pool_size`, **given prefetch == pool_size**. Default: `min=2 × 4 = 8` to `max=50 × 4 = 200`.
+
+This identity is only true while prefetch tracks pool size; if you change one, change both.
 
 The split matters:
 - Pod-level scaling is **slow** (image pull, startup, KEDA polling interval). It absorbs sustained load.

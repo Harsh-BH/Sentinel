@@ -1,3 +1,12 @@
+-- GENERATED FILE — DO NOT EDIT.
+-- Source: migrations/001_initial_schema.up.sql
+-- Regenerate: make k8s-sync-schema   (CI fails if this drifts)
+--
+-- Kustomize refuses file sources outside its root, so the schema is copied
+-- here rather than referenced. The copy is generated and drift-checked so it
+-- cannot rot the way the previous hand-maintained inline copy did — that one
+-- had drifted into invalid DDL (PRIMARY KEY missing the partition column).
+
 -- =============================================================================
 -- Project Sentinel — Initial Database Schema
 -- =============================================================================

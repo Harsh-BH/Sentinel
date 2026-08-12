@@ -154,6 +154,15 @@ spec:
         - name: frontend
           image: ghcr.io/harsh-bh/sentinel-frontend:latest
           imagePullPolicy: IfNotPresent
+          env:
+            # nginx proxies /api to the API. The image defaults to the
+            # docker-compose service name ("api"), which does not exist here —
+            # without these the container crash-loops with
+            # "host not found in upstream". The Service name is sentinel-api.
+            - name: API_UPSTREAM
+              value: "sentinel-api:8080"
+            - name: DNS_RESOLVER
+              value: "kube-dns.kube-system.svc.cluster.local"
           ports:
             - name: http
               containerPort: 80

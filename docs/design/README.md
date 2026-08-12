@@ -10,8 +10,9 @@ These complement (not replace) the higher-level [architecture overview](../archi
 |---|-------|-------|
 | [0001](./0001-sandbox-security.md) | Sandbox security model | nsjail layering, kafel seccomp, threat model |
 | [0002](./0002-queue-and-delivery-semantics.md) | Queue topology and delivery semantics | Exchange/queue layout, ACK-after-execute, idempotency, DLX, known declaration mismatch |
-| [0003](./0003-scaling-architecture.md) | Scaling architecture | KEDA + worker pool, prefetch=1 backpressure, capacity math |
-| [0004](./0004-data-model-and-partitioning.md) | Data model and partitioning | `execution_jobs` schema, UUIDv7, partial index, status state machine |
+| [0003](./0003-scaling-architecture.md) | Scaling architecture | KEDA + worker pool, prefetch==pool_size backpressure, capacity math |
+| [0004](./0004-data-model-and-partitioning.md) | Data model and partitioning | `execution_jobs` schema, UUIDv7, partition pruning, status state machine |
+| [0005](./0005-job-lease-and-recovery.md) | Job leases and crash recovery | Postgres lease replaces the Redis dedup lock, guarded writes, reaper. **Supersedes the idempotency design in 0002** |
 
 ## When to add a new design doc
 

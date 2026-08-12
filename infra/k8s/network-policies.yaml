@@ -171,14 +171,9 @@ spec:
       ports:
         - protocol: TCP
           port: 5672
-    # To Redis
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: sentinel-redis
-      ports:
-        - protocol: TCP
-          port: 6379
+    # No Redis egress: the worker no longer uses Redis. Deduplication moved into
+    # the execution_jobs lease, so keeping this allow rule would grant the pod
+    # that runs untrusted code reach it does not need.
 ---
 # ── PostgreSQL pod policies ──
 # Accepts connections from API and Worker only

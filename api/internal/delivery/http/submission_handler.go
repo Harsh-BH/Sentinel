@@ -41,9 +41,9 @@ func (h *SubmissionHandler) Submit(c *gin.Context) {
 	resp, err := h.submitUC.Execute(c.Request.Context(), &req)
 	if err != nil {
 		switch {
-		case errors.Is(err, domain.ErrInvalidLanguage):
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		case errors.Is(err, domain.ErrEmptySourceCode):
+		case errors.Is(err, domain.ErrInvalidLanguage),
+			errors.Is(err, domain.ErrEmptySourceCode),
+			errors.Is(err, domain.ErrInvalidLimit):
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		case errors.Is(err, domain.ErrPayloadTooLarge):
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
@@ -72,6 +72,14 @@ func (h *SubmissionHandler) GetByID(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, domain.ErrJobNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+			return
+		}
+		// A dependency outage is 503, not 404 and not 500: it is retryable and it
+		// is not the caller's fault. Returning 404 here (the previous behaviour)
+		// actively misleads both the client and whoever is on call.
+		if errors.Is(err, domain.ErrDatabaseUnavailable) {
+			h.logger.Error("Get job failed: database unavailable", zap.Error(err), zap.String("job_id", idStr))
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Service temporarily unavailable"})
 			return
 		}
 		h.logger.Error("Get job failed", zap.Error(err), zap.String("job_id", idStr))

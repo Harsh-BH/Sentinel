@@ -2,6 +2,8 @@ package pool_test
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,41 +13,69 @@ import (
 
 	"github.com/Harsh-BH/Sentinel/worker/internal/domain"
 	"github.com/Harsh-BH/Sentinel/worker/internal/pool"
+	"github.com/Harsh-BH/Sentinel/worker/internal/repository"
 	"github.com/Harsh-BH/Sentinel/worker/internal/repository/mock"
 	"github.com/Harsh-BH/Sentinel/worker/internal/usecase"
 )
 
-func newTestPool(t *testing.T, poolSize int, exec *mock.Executor) (chan *domain.JobMessage, *pool.WorkerPool, context.CancelFunc) {
+type testPool struct {
+	ch            chan *domain.JobMessage
+	wp            *pool.WorkerPool
+	stopAccepting context.CancelFunc
+	cancelJobs    context.CancelFunc
+}
+
+func newTestPool(t *testing.T, poolSize int, repo *mock.JobRepository, exec *mock.Executor) *testPool {
 	t.Helper()
 
 	logger := zap.NewNop()
-	repo := &mock.JobRepository{}
-	idem := &mock.IdempotencyStore{}
-	uc := usecase.NewExecuteJobUsecase(repo, idem, exec, logger)
+	uc := usecase.NewExecuteJobUsecase(repo, exec, logger)
 
 	ch := make(chan *domain.JobMessage, 16)
-	ctx, cancel := context.WithCancel(context.Background())
-	wp := pool.NewWorkerPool(poolSize, ch, uc, logger)
-	wp.Start(ctx)
+	acceptCtx, stopAccepting := context.WithCancel(context.Background())
+	jobCtx, cancelJobs := context.WithCancel(context.Background())
 
-	return ch, wp, cancel
+	wp := pool.NewWorkerPool(poolSize, ch, uc, logger)
+	wp.Start(acceptCtx, jobCtx)
+
+	t.Cleanup(func() {
+		stopAccepting()
+		cancelJobs()
+	})
+
+	return &testPool{ch: ch, wp: wp, stopAccepting: stopAccepting, cancelJobs: cancelJobs}
 }
 
-func sendJob(ch chan<- *domain.JobMessage, acked *atomic.Int32, nacked *atomic.Int32) {
-	ch <- &domain.JobMessage{
+// settleRecorder mimics the consumer's sync.Once wrapping so tests exercise the
+// same "first settle wins" contract the real Ack/Nack closures provide.
+type settleRecorder struct {
+	acked    atomic.Int32
+	nacked   atomic.Int32
+	requeued atomic.Int32
+}
+
+func (s *settleRecorder) message() *domain.JobMessage {
+	var once sync.Once
+	return &domain.JobMessage{
 		Job: &domain.Job{
 			JobID:         uuid.New(),
 			Language:      domain.LangPython,
 			SourceCode:    "print('test')",
 			TimeLimitMs:   5000,
 			MemoryLimitKB: 262144,
+			CreatedAt:     time.Now().UTC(),
 		},
 		Ack: func() error {
-			acked.Add(1)
+			once.Do(func() { s.acked.Add(1) })
 			return nil
 		},
 		Nack: func(requeue bool) error {
-			nacked.Add(1)
+			once.Do(func() {
+				s.nacked.Add(1)
+				if requeue {
+					s.requeued.Add(1)
+				}
+			})
 			return nil
 		},
 	}
@@ -53,142 +83,176 @@ func sendJob(ch chan<- *domain.JobMessage, acked *atomic.Int32, nacked *atomic.I
 
 // Test: pool processes jobs and ACKs them.
 func TestPool_ProcessAndAck(t *testing.T) {
-	exec := &mock.Executor{}
-	ch, wp, cancel := newTestPool(t, 2, exec)
+	var rec settleRecorder
+	tp := newTestPool(t, 2, &mock.JobRepository{}, &mock.Executor{})
 
-	var acked, nacked atomic.Int32
-
-	for i := 0; i < 5; i++ {
-		sendJob(ch, &acked, &nacked)
-	}
-
-	// Give workers time to process.
+	tp.ch <- rec.message()
 	time.Sleep(200 * time.Millisecond)
 
-	cancel()
-	wp.Stop()
-
-	if acked.Load() != 5 {
-		t.Errorf("expected 5 ACKs, got %d", acked.Load())
+	if rec.acked.Load() != 1 {
+		t.Errorf("expected 1 ACK, got %d", rec.acked.Load())
 	}
-	if nacked.Load() != 0 {
-		t.Errorf("expected 0 NACKs, got %d", nacked.Load())
+	if rec.nacked.Load() != 0 {
+		t.Errorf("expected 0 NACKs, got %d", rec.nacked.Load())
 	}
 }
 
-// Test: pool NACKs jobs that fail execution.
-func TestPool_NacksOnFailure(t *testing.T) {
-	exec := &mock.Executor{
-		ExecuteFn: func(ctx context.Context, req *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
-			return nil, context.DeadlineExceeded
+// Test: a duplicate is ACKed (removed from the queue), not NACKed.
+func TestPool_DuplicateIsAcked(t *testing.T) {
+	var rec settleRecorder
+	repo := &mock.JobRepository{
+		ClaimFn: func(context.Context, uuid.UUID, time.Time, domain.ExecutionStatus, time.Duration) (repository.ClaimOutcome, error) {
+			return repository.ClaimTerminal, nil
 		},
 	}
-	ch, wp, cancel := newTestPool(t, 1, exec)
+	tp := newTestPool(t, 1, repo, &mock.Executor{})
 
-	var acked, nacked atomic.Int32
-	sendJob(ch, &acked, &nacked)
-
+	tp.ch <- rec.message()
 	time.Sleep(200 * time.Millisecond)
 
-	cancel()
-	wp.Stop()
-
-	if nacked.Load() != 1 {
-		t.Errorf("expected 1 NACK, got %d", nacked.Load())
-	}
-	if acked.Load() != 0 {
-		t.Errorf("expected 0 ACKs, got %d", acked.Load())
+	if rec.acked.Load() != 1 {
+		t.Errorf("expected duplicate to be ACKed, got %d acks", rec.acked.Load())
 	}
 }
 
-// Test: pool shuts down gracefully (context cancellation).
-func TestPool_GracefulShutdown(t *testing.T) {
-	exec := &mock.Executor{}
-	ch, wp, cancel := newTestPool(t, 4, exec)
+// Test: an infrastructure failure dead-letters WITHOUT requeue. Requeuing would
+// spin a hot loop against the broken dependency; the reaper re-submits instead.
+func TestPool_RetryableFailure_DeadLettersWithoutRequeue(t *testing.T) {
+	var rec settleRecorder
+	exec := &mock.Executor{
+		ExecuteFn: func(context.Context, *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
+			return nil, errors.New("sandbox down")
+		},
+	}
+	tp := newTestPool(t, 1, &mock.JobRepository{}, exec)
 
-	// Send some jobs then immediately cancel.
-	var acked, nacked atomic.Int32
-	sendJob(ch, &acked, &nacked)
-	sendJob(ch, &acked, &nacked)
+	tp.ch <- rec.message()
+	time.Sleep(200 * time.Millisecond)
 
-	// Small delay so at least one job gets picked up.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	wp.Stop()
-	close(ch)
-
-	// All sent jobs should be ACKed (they were in the buffer before cancel).
-	total := acked.Load() + nacked.Load()
-	if total < 1 {
-		t.Errorf("expected at least 1 processed job, got %d", total)
+	if rec.nacked.Load() != 1 {
+		t.Errorf("expected 1 NACK, got %d", rec.nacked.Load())
+	}
+	if rec.requeued.Load() != 0 {
+		t.Errorf("expected NACK without requeue, got %d requeues", rec.requeued.Load())
 	}
 }
 
-// Test: a panic during execution requeues the in-flight message and the pool
-// relaunches the worker so capacity is preserved and later jobs still run.
+// Test: a panic requeues the in-flight message and relaunches the worker.
+//
+// This is the regression test for the panic path having been disabled with
+// `if false && inFlight != nil`, which left the message unacked forever — and
+// because prefetch caps unacked deliveries, a single panic could stall the pod.
 func TestPool_PanicRequeuesAndRelaunches(t *testing.T) {
 	var panicOnce atomic.Bool
 	exec := &mock.Executor{
-		ExecuteFn: func(ctx context.Context, req *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
-			// Panic only for the very first job; subsequent jobs succeed.
+		ExecuteFn: func(context.Context, *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
 			if panicOnce.CompareAndSwap(false, true) {
 				panic("boom")
 			}
 			return &domain.ExecutionResult{Status: domain.StatusSuccess}, nil
 		},
 	}
-	ch, wp, cancel := newTestPool(t, 1, exec)
+	tp := newTestPool(t, 1, &mock.JobRepository{}, exec)
 
-	var acked, nacked atomic.Int32
+	var first, second settleRecorder
 
-	// First job panics → should be NACKed with requeue.
-	sendJob(ch, &acked, &nacked)
-	time.Sleep(100 * time.Millisecond)
-
-	// A second job proves the (single) worker was relaunched and still processes.
-	sendJob(ch, &acked, &nacked)
+	tp.ch <- first.message()
 	time.Sleep(200 * time.Millisecond)
 
-	cancel()
-	wp.Stop()
+	// A second job proves the single worker was relaunched and still processes.
+	tp.ch <- second.message()
+	time.Sleep(300 * time.Millisecond)
 
-	if nacked.Load() != 1 {
-		t.Errorf("expected 1 NACK (requeue) from panic, got %d", nacked.Load())
+	if first.nacked.Load() != 1 {
+		t.Errorf("expected the panicking job to be NACKed, got %d", first.nacked.Load())
 	}
-	if acked.Load() != 1 {
-		t.Errorf("expected 1 ACK from the post-relaunch job, got %d", acked.Load())
+	if first.requeued.Load() != 1 {
+		t.Errorf("expected the panicking job to be requeued, got %d", first.requeued.Load())
+	}
+	if second.acked.Load() != 1 {
+		t.Errorf("expected the post-relaunch job to be ACKed, got %d", second.acked.Load())
 	}
 }
 
-// Test: pool handles duplicate jobs (ACKs them, not NACKs).
-func TestPool_DuplicateIsAcked(t *testing.T) {
-	exec := &mock.Executor{}
+// Test: an in-flight job finishes during shutdown instead of being killed.
+//
+// This is the regression test for the shutdown bug: collapsing "stop accepting"
+// and "abandon work" into one context SIGKILLed nsjail mid-execution, so every
+// job running during a rolling deploy was lost.
+func TestPool_ShutdownDrainsInFlightJob(t *testing.T) {
+	var rec settleRecorder
+	started := make(chan struct{})
+	var completed atomic.Bool
 
-	logger := zap.NewNop()
-	repo := &mock.JobRepository{}
-	idem := &mock.IdempotencyStore{
-		AcquireLockFn: func(ctx context.Context, jobID uuid.UUID) (bool, error) {
-			return false, nil // duplicate
+	exec := &mock.Executor{
+		ExecuteFn: func(ctx context.Context, _ *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
+			close(started)
+			// Simulate a job still running when SIGTERM arrives. If the job context
+			// were cancelled at "stop accepting" time, this would return early.
+			select {
+			case <-time.After(300 * time.Millisecond):
+				completed.Store(true)
+				return &domain.ExecutionResult{Status: domain.StatusSuccess}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		},
 	}
-	uc := usecase.NewExecuteJobUsecase(repo, idem, exec, logger)
+	tp := newTestPool(t, 1, &mock.JobRepository{}, exec)
 
-	ch := make(chan *domain.JobMessage, 8)
-	ctx, cancel := context.WithCancel(context.Background())
-	wp := pool.NewWorkerPool(1, ch, uc, logger)
-	wp.Start(ctx)
+	tp.ch <- rec.message()
+	<-started
 
-	var acked, nacked atomic.Int32
-	sendJob(ch, &acked, &nacked)
-
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-	wp.Stop()
-
-	if acked.Load() != 1 {
-		t.Errorf("expected 1 ACK for duplicate, got %d", acked.Load())
+	// SIGTERM equivalent: stop accepting, then drain with a generous deadline.
+	tp.stopAccepting()
+	if drained := tp.wp.Stop(5 * time.Second); !drained {
+		t.Fatal("pool failed to drain within the deadline")
 	}
-	if nacked.Load() != 0 {
-		t.Errorf("expected 0 NACKs, got %d", nacked.Load())
+
+	if !completed.Load() {
+		t.Error("in-flight job was killed by shutdown instead of being allowed to finish")
+	}
+	if rec.acked.Load() != 1 {
+		t.Errorf("expected the drained job to be ACKed, got %d", rec.acked.Load())
+	}
+}
+
+// Test: Stop reports failure when a job outlasts the drain deadline, which is
+// what tells main() to cancel the job context as a last resort.
+func TestPool_StopReportsDrainTimeout(t *testing.T) {
+	var rec settleRecorder
+	started := make(chan struct{})
+
+	exec := &mock.Executor{
+		ExecuteFn: func(ctx context.Context, _ *domain.ExecutionRequest) (*domain.ExecutionResult, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	tp := newTestPool(t, 1, &mock.JobRepository{}, exec)
+
+	tp.ch <- rec.message()
+	<-started
+
+	tp.stopAccepting()
+	if drained := tp.wp.Stop(200 * time.Millisecond); drained {
+		t.Error("expected Stop to report a drain timeout for a hung job")
+	}
+
+	// The escape hatch: cancelling the job context unblocks the straggler.
+	tp.cancelJobs()
+	if drained := tp.wp.Stop(2 * time.Second); !drained {
+		t.Error("expected the pool to drain once the job context was cancelled")
+	}
+}
+
+// Test: pool with no work shuts down promptly.
+func TestPool_GracefulShutdown(t *testing.T) {
+	tp := newTestPool(t, 4, &mock.JobRepository{}, &mock.Executor{})
+
+	tp.stopAccepting()
+	if drained := tp.wp.Stop(2 * time.Second); !drained {
+		t.Error("idle pool failed to shut down")
 	}
 }

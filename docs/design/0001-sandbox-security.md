@@ -9,7 +9,7 @@ The worker runs untrusted code submitted by anonymous users. The threat surface 
 
 The chosen primitive is [google/nsjail](https://github.com/google/nsjail) invoked as a subprocess from Go (`os/exec`), driven by a static protobuf config per language and a kafel seccomp policy. The worker writes source + stdin to an ephemeral `os.MkdirTemp` workdir, runs nsjail with that workdir as input, then deletes the workdir.
 
-> **Current status:** the kafel seccomp policies are authored (`sandbox/policies/`) but **not yet enforced** — the `seccomp_policy_file:` directive is commented out in both `sandbox/nsjail/*.cfg` pending a syscall-table audit (see [Known limitations](#known-limitations)). The six other layers below are active.
+> **Current status:** all seven layers are active. The kafel seccomp policies are **enforced** (`seccomp_policy_file:` is set in both `sandbox/nsjail/*.cfg`) as allowlists with `DEFAULT KILL`.
 
 ## Decision
 
@@ -18,7 +18,7 @@ We design for seven independent isolation mechanisms. An attacker must break eve
 1. **`pivot_root` to a minimal rootfs** — only the language runtime (`python3.12` or `g++`) plus required `.so` files are visible. No `/etc/passwd`, no `/proc/self/exe` resolves to anything useful, no host paths reachable.
 2. **All seven Linux namespaces** — `PID`, `NET`, `MNT`, `UTS`, `IPC`, `USER`, `CGROUP`. Empty network namespace means even a kernel bug that unblocks `socket(2)` produces an unreachable socket — there is no route, no DNS, no `lo`.
 3. **Cgroups v2 limits** — `memory.max`, `pids.max`, `cpu.max`. Enforced by the kernel, not the runtime; even a runtime escape doesn't bypass them.
-4. **Seccomp-BPF allowlist via kafel** *(authored, not yet enforced — see status note above)* — see `sandbox/policies/{python,cpp}.policy`. Intended default is `KILL_PROCESS` for any unlisted syscall, with critical denies for `ptrace`, `mount`, `setuid/setgid`, and the whole `socket`/`connect`/`bind` family. Currently commented out in the nsjail configs; the socket-family denial it would add is presently covered by the empty network namespace (layer 2).
+4. **Seccomp-BPF allowlist via kafel** — `sandbox/policies/{python,cpp}.policy`, `DEFAULT KILL` for anything unlisted. Because it is an allowlist, dangerous syscalls are blocked by omission rather than by enumeration: `ptrace`, `process_vm_readv/writev`, `mount`/`umount2`/`pivot_root`/`chroot`/`unshare`/`setns`, `bpf`, `perf_event_open`, `io_uring_setup`, `userfaultfd`, `init_module`/`kexec_load`, `setuid`/`setgid`/`capset`, `clock_settime`, `keyctl`, and the whole `socket`/`connect`/`bind`/`sendto` family are all unreachable. The socket denial overlaps with the empty network namespace (layer 2) on purpose — two independent mechanisms, so a regression in one does not open the network.
 5. **Container-level hardening** — worker pod runs as non-root, drops all capabilities, mounts `/` read-only, with `securityContext.readOnlyRootFilesystem: true`.
 6. **NetworkPolicy default-deny** in the `sentinel` namespace — even if a sandboxed process somehow obtained network access, kube-proxy/CNI rules would drop the packets.
 7. **Application-layer guards** — request body limit (1 MB), source code limit (1 MB enforced in usecase), per-IP rate limiting, language allowlist.
@@ -68,7 +68,13 @@ The sandbox cannot run on a non-Linux host. Specifically:
 
 ## Known limitations
 
-- **Seccomp policy temporarily disabled.** The kafel build linked into `nsjail` in our worker image rejects several syscall identifiers used in `sandbox/policies/{python,cpp}.policy` (e.g. `fstat`) as "Undefined identifier", because kafel's syscall table differs from libc's. Until the policies are audited against this build's symbol table, `seccomp_policy_file:` is commented out in both `*.cfg` files. The other six layers (namespaces, cgroups, pivot_root, container hardening, network policy, application guards) remain active. Re-enable by uncommenting the directive after fixing the policy. *Action item: regenerate from kafel's known syscall list, or pre-process the policy to drop unknown names.*
+- **~~Seccomp policy temporarily disabled.~~ RESOLVED.** The policies now load and are enforced.
+
+  Worth recording how this was diagnosed, because the original note misread the problem as "kafel's table differs from libc's, so audit the names". The real situation was narrower and more interesting: of ~110 candidate syscalls, kafel rejected exactly **two** — `futex_time64` (a 32-bit-only variant, irrelevant on x86_64) and `uname` (kafel spells it `newuname`, the kernel's internal name). `fstat`, the name in the original error message, was rejected *and* unnecessary: current glibc issues `newfstatat`, so CPython never calls `fstat` at all. The blocker was one dead entry in a hand-written list.
+
+  The list is now derived rather than authored: `strace -f` on CPython (stdin, file I/O, threading, json, random, math, time, subprocess) and on `g++ -O2` (which fork/execs cc1plus, as and ld), unioned with a curated margin for signal and event-loop paths that tracing did not exercise. `restart_syscall` is the subtle one — omit it and any program interrupted by a signal mid-syscall dies.
+
+  Regression coverage lives in `scripts/integration-test.sh`: a realistic Python program must still succeed, while `socket()` and `ptrace()` must be killed.
 - **Side-channels.** We do not defend against timing or cache side-channels between concurrent sandboxes on the same node. This is out of scope: we don't process secrets in the sandbox.
 - **Host kernel CVEs.** A new local-privilege-escalation in the kernel is, by definition, unmitigated. The seccomp allowlist (when re-enabled) narrows the attack surface but does not eliminate it. We accept this risk and rely on host patching cadence.
 - **Resource accounting precision.** `memory_used_kb` is meant to be read from cgroup `memory.peak`. On the current cgroup v2 / cgroupns:host setup that read is failing silently — every job reports `memory_used_kb: 0`. The execution itself is unaffected; only the metric is wrong. *Action item: pull peak from the worker's own cgroup tree rather than the ephemeral workdir.*

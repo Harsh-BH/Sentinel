@@ -74,28 +74,46 @@ spec:
             requests:
               cpu: 500m
               memory: 512Mi
+              ephemeral-storage: 1Gi
             limits:
               cpu: "2"
-              memory: 1Gi
+              # Headroom for pool_size concurrent sandboxes plus the Go runtime.
+              # A single job may request up to 512 MB, so 4 concurrent jobs can
+              # legitimately need more than 1Gi — the old limit would OOMKill the
+              # pod as soon as concurrency actually worked.
+              memory: 3Gi
+              ephemeral-storage: 2Gi
           securityContext:
             privileged: true     # Required for nsjail namespace creation
+          env:
+            # The executor creates sandbox workdirs with os.MkdirTemp(""), which
+            # honours TMPDIR. Pointing it at the size-limited emptyDir is what
+            # actually bounds sandbox disk usage — the volume used to be mounted
+            # at /tmp/sentinel, which nothing ever wrote to, so workdirs landed on
+            # the node's writable layer with no limit at all.
+            - name: TMPDIR
+              value: /sandbox-tmp
           volumeMounts:
-            - name: nsjail-config
-              mountPath: /etc/nsjail
-              readOnly: true
+            # No nsjail-config mount: the sandbox configs ship in the image at
+            # /etc/sentinel/nsjail (see worker/Dockerfile). The ConfigMap copy was
+            # a third, drifted, unparseable version of the same files.
             - name: sandbox-tmp
-              mountPath: /tmp/sentinel
+              mountPath: /sandbox-tmp
           livenessProbe:
+            # Process liveness ONLY. Restarting a worker never fixes a Postgres
+            # outage; checking dependencies here just restarts every pod at once.
             httpGet:
-              path: /healthz
+              path: /livez
               port: health
             initialDelaySeconds: 15
             periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
+            # Dependency checks belong here: failing readiness only removes the
+            # pod from service, which is the proportionate response.
             httpGet:
-              path: /healthz
+              path: /readyz
               port: health
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -103,15 +121,12 @@ spec:
             failureThreshold: 3
           startupProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: health
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 12
       volumes:
-        - name: nsjail-config
-          configMap:
-            name: sentinel-nsjail-config
         - name: sandbox-tmp
           emptyDir:
             sizeLimit: 2Gi

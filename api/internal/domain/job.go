@@ -58,8 +58,11 @@ type Job struct {
 	MemoryUsedKB  *int            `json:"memory_used_kb,omitempty"`
 	TimeLimitMs   int             `json:"time_limit_ms"`
 	MemoryLimitKB int             `json:"memory_limit_kb"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	// Attempts counts how many times a worker has claimed this job. Internal
+	// bookkeeping for the reaper's retry cap — never exposed to clients.
+	Attempts  int       `json:"-"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // SubmitRequest represents an incoming code submission from the API.

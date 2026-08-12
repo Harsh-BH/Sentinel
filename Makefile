@@ -12,6 +12,7 @@
         docker-build docker-build-api docker-build-worker docker-build-frontend \
         docker-push \
         k8s-apply k8s-delete k8s-status k8s-logs k8s-setup k8s-teardown \
+        k8s-sync-schema k8s-verify-schema k8s-validate \
         monitoring-up monitoring-down monitoring-status \
         load-test security-audit
 
@@ -162,7 +163,43 @@ NAMESPACE ?= sentinel
 k8s-setup: ## Full k3s cluster setup (requires sudo)
 	sudo ./scripts/setup-k3s.sh
 
-k8s-apply: ## Apply all K8s manifests via Kustomize
+K8S_SCHEMA_COPY := infra/k8s/generated/postgres-init.sql
+K8S_SCHEMA_SRC  := migrations/001_initial_schema.up.sql
+
+k8s-sync-schema: ## Regenerate the k8s postgres-init copy from migrations/
+	@mkdir -p $(dir $(K8S_SCHEMA_COPY))
+	@{ \
+	  echo "-- GENERATED FILE — DO NOT EDIT."; \
+	  echo "-- Source: $(K8S_SCHEMA_SRC)"; \
+	  echo "-- Regenerate: make k8s-sync-schema   (CI fails if this drifts)"; \
+	  echo "--"; \
+	  echo "-- Kustomize refuses file sources outside its root, so the schema is copied"; \
+	  echo "-- here rather than referenced. The copy is generated and drift-checked so it"; \
+	  echo "-- cannot rot the way the previous hand-maintained inline copy did — that one"; \
+	  echo "-- had drifted into invalid DDL (PRIMARY KEY missing the partition column)."; \
+	  echo ""; \
+	  cat $(K8S_SCHEMA_SRC); \
+	} > $(K8S_SCHEMA_COPY)
+	@echo "Regenerated $(K8S_SCHEMA_COPY)"
+
+k8s-verify-schema: ## Fail if the k8s schema copy has drifted from migrations/
+	@$(MAKE) --no-print-directory k8s-sync-schema K8S_SCHEMA_COPY=$(K8S_SCHEMA_COPY).check >/dev/null
+	@if ! diff -q $(K8S_SCHEMA_COPY) $(K8S_SCHEMA_COPY).check >/dev/null 2>&1; then \
+	  rm -f $(K8S_SCHEMA_COPY).check; \
+	  echo "ERROR: $(K8S_SCHEMA_COPY) has drifted from $(K8S_SCHEMA_SRC)."; \
+	  echo "Run 'make k8s-sync-schema' and commit the result."; \
+	  exit 1; \
+	fi
+	@rm -f $(K8S_SCHEMA_COPY).check
+	@echo "k8s schema copy is in sync with $(K8S_SCHEMA_SRC)"
+
+k8s-validate: k8s-verify-schema ## Render manifests with kustomize to catch invalid YAML/paths
+	@command -v kustomize >/dev/null 2>&1 \
+	  && kustomize build infra/k8s/ >/dev/null \
+	  || docker run --rm -v "$(PWD)":/w -w /w registry.k8s.io/kustomize/kustomize:v5.4.3 build infra/k8s >/dev/null
+	@echo "kustomize build OK"
+
+k8s-apply: k8s-validate ## Apply all K8s manifests via Kustomize
 	kubectl apply -k infra/k8s/
 
 k8s-delete: ## Delete all K8s resources

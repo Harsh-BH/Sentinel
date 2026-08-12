@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -21,8 +22,8 @@ type MockJobRepository struct {
 	// Hook functions for injecting errors
 	CreateFunc       func(ctx context.Context, job *domain.Job) error
 	GetByIDFunc      func(ctx context.Context, id uuid.UUID) (*domain.Job, error)
-	UpdateStatusFunc func(ctx context.Context, id uuid.UUID, status domain.ExecutionStatus) error
-	SetResultFunc    func(ctx context.Context, id uuid.UUID, result *domain.Job) error
+	UpdateStatusFunc func(ctx context.Context, id uuid.UUID, createdAt time.Time, status domain.ExecutionStatus) error
+	ReclaimStuckFunc func(ctx context.Context, grace time.Duration, limit int) ([]*domain.Job, error)
 }
 
 // NewMockJobRepository creates a new mock repository.
@@ -32,14 +33,15 @@ func NewMockJobRepository() *MockJobRepository {
 	}
 }
 
-func (m *MockJobRepository) Create(ctx context.Context, job *domain.Job) error {
-	if m.CreateFunc != nil {
-		return m.CreateFunc(ctx, job)
-	}
+// Seed stages a job row directly, standing in for the outbox's transactional
+// insert in tests that only care about reads.
+func (m *MockJobRepository) Seed(job *domain.Job) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now().UTC()
+	}
 	m.jobs[job.JobID] = job
-	return nil
 }
 
 func (m *MockJobRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Job, error) {
@@ -55,37 +57,29 @@ func (m *MockJobRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 	return job, nil
 }
 
-func (m *MockJobRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status domain.ExecutionStatus) error {
+func (m *MockJobRepository) UpdateStatus(ctx context.Context, id uuid.UUID, createdAt time.Time, status domain.ExecutionStatus) error {
 	if m.UpdateStatusFunc != nil {
-		return m.UpdateStatusFunc(ctx, id, status)
+		return m.UpdateStatusFunc(ctx, id, createdAt, status)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job, ok := m.jobs[id]
 	if !ok {
+		return domain.ErrJobNotFound
+	}
+	// Mirror the SQL guard: never clobber a terminal state.
+	if job.Status.IsTerminal() {
 		return domain.ErrJobNotFound
 	}
 	job.Status = status
 	return nil
 }
 
-func (m *MockJobRepository) SetResult(ctx context.Context, id uuid.UUID, result *domain.Job) error {
-	if m.SetResultFunc != nil {
-		return m.SetResultFunc(ctx, id, result)
+func (m *MockJobRepository) ReclaimStuck(ctx context.Context, grace time.Duration, limit int) ([]*domain.Job, error) {
+	if m.ReclaimStuckFunc != nil {
+		return m.ReclaimStuckFunc(ctx, grace, limit)
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	job, ok := m.jobs[id]
-	if !ok {
-		return domain.ErrJobNotFound
-	}
-	job.Stdout = result.Stdout
-	job.Stderr = result.Stderr
-	job.Status = result.Status
-	job.ExitCode = result.ExitCode
-	job.TimeUsedMs = result.TimeUsedMs
-	job.MemoryUsedKB = result.MemoryUsedKB
-	return nil
+	return nil, nil
 }
 
 // GetAll returns all stored jobs (for test assertions).

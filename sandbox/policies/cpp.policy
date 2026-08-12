@@ -1,140 +1,80 @@
 /* =============================================================================
- * Kafel seccomp-bpf policy for C++17 compilation and execution
+ * Kafel seccomp-bpf policy — C++17 compilation and execution
  * Project Sentinel
  *
- * Extends the Python policy with additional syscalls needed by g++ compiler.
+ * ALLOWLIST, DEFAULT KILL. See sandbox/policies/python.policy for how the list
+ * was derived and for the full list of what is deliberately excluded (network,
+ * ptrace, mount, bpf, module loading, privilege transitions, clock tampering).
+ *
+ * This policy is used for BOTH passes of the C++ pipeline — the g++ invocation
+ * and the compiled program — because both run under the same nsjail config.
+ * g++ is by far the more demanding of the two: it fork/execs cc1plus, as and
+ * collect2/ld, writes and renames temporary files, and calls getrusage to
+ * report timings. The syscall set below was captured with `strace -f g++ -O2`
+ * on a program using <iostream> and <vector>, then widened for linking.
+ *
+ * Note that allowing fork/exec here is not a weakening: the children inherit
+ * this same filter, the empty network namespace, the PID namespace and
+ * cgroup_pids_max, so a fork bomb is bounded by the cgroup rather than by the
+ * syscall filter.
  * =============================================================================
  */
 
 POLICY cpp {
-  /* File I/O */
+  /* File and descriptor I/O. The compiler needs the mutating calls (rename,
+   * unlink, chmod, umask, ftruncate) that a pure runtime policy would omit —
+   * it writes temporary objects and then renames them into place. */
   ALLOW {
-    read,
-    write,
-    openat,
-    close,
-    fstat,
-    newfstatat,
-    statx,
-    lseek,
-    lstat,
-    stat,
-    access,
-    faccessat,
-    faccessat2,
-    getcwd,
-    readlink,
-    readlinkat,
-    getdents64,
-    dup,
-    dup2,
-    dup3,
-    fcntl,
-    ioctl,
-    pipe,
-    pipe2,
-    /* Additional for g++ compilation */
-    rename,
-    renameat,
-    renameat2,
-    unlink,
-    unlinkat,
-    mkdir,
-    mkdirat,
-    symlink,
-    symlinkat,
-    chmod,
-    fchmod,
-    fchmodat,
-    chown,
-    fchown,
-    fchownat,
-    truncate,
-    ftruncate
+    read, write, openat, close, lseek, pread64, pwrite64, readv, writev,
+    newfstatat, statx, fstatfs, statfs,
+    access, faccessat, faccessat2,
+    getcwd, readlink, readlinkat, getdents64,
+    dup, dup2, dup3, fcntl, ioctl, pipe, pipe2,
+    ftruncate, truncate, unlink, unlinkat, mkdir, mkdirat, rmdir,
+    rename, renameat, renameat2, chmod, fchmod, fchmodat, umask
   },
 
-  /* Memory management */
+  /* Memory management. g++ is memory hungry; mremap matters for its arenas. */
   ALLOW {
-    brk,
-    mmap,
-    mprotect,
-    munmap,
-    mremap,
-    madvise
+    brk, mmap, mprotect, munmap, mremap, madvise, mlock, munlock, membarrier
   },
 
-  /* Process lifecycle — g++ spawns child processes */
+  /* Process lifecycle. g++ drives cc1plus / as / ld as child processes, so
+   * vfork + wait4 + waitid + getrusage are all required for compilation. */
   ALLOW {
-    execve,
-    exit_group,
-    exit,
-    clone,
-    clone3,
-    vfork,
-    wait4,
-    waitid,
-    getpid,
-    getppid,
-    gettid,
-    getuid,
-    getgid,
-    geteuid,
-    getegid,
-    getgroups,
-    setgroups,
-    getpgid,
-    setpgid,
-    getpgrp,
-    setsid
+    execve, execveat, exit, exit_group,
+    clone, clone3, fork, vfork, wait4, waitid,
+    getpid, getppid, gettid,
+    getuid, geteuid, getgid, getegid, getgroups,
+    getrusage, getrlimit, prlimit64, setrlimit, prctl
   },
 
-  /* Signals */
+  /* Signals. */
   ALLOW {
-    rt_sigaction,
-    rt_sigprocmask,
-    rt_sigreturn,
-    sigaltstack,
-    kill,           /* g++ may send signals to child processes */
-    tgkill
+    rt_sigaction, rt_sigprocmask, rt_sigreturn, rt_sigtimedwait,
+    sigaltstack, tgkill, kill, restart_syscall
   },
 
-  /* Thread synchronization */
+  /* Thread synchronisation. */
   ALLOW {
-    futex,
-    set_tid_address,
-    set_robust_list,
-    get_robust_list,
-    rseq
+    futex, set_tid_address, set_robust_list, get_robust_list, rseq
   },
 
-  /* System information */
+  /* System information. */
   ALLOW {
-    uname,
-    sysinfo,
-    arch_prctl,
-    prlimit64,
-    getrandom
+    newuname, sysinfo, arch_prctl, getrandom,
+    sched_yield, sched_getaffinity, sched_getparam, sched_getscheduler
   },
 
-  /* Time */
+  /* Time. */
   ALLOW {
-    clock_gettime,
-    clock_getres,
-    gettimeofday,
-    nanosleep,
-    clock_nanosleep
+    clock_gettime, clock_getres, clock_nanosleep, gettimeofday, nanosleep, time
   },
 
-  /* Misc */
+  /* Event loops and multiplexing. */
   ALLOW {
-    poll,
-    ppoll,
-    select,
-    pselect6,
-    epoll_create1,
-    epoll_ctl,
-    epoll_wait,
-    eventfd2
+    poll, ppoll, select, pselect6,
+    epoll_create1, epoll_ctl, epoll_wait, epoll_pwait, eventfd2
   }
 }
 

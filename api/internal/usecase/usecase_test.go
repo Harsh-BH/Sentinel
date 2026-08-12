@@ -13,11 +13,11 @@ import (
 )
 
 func TestSubmitJob_Success(t *testing.T) {
-	repo := mockrepo.NewMockJobRepository()
+	outbox := mockrepo.NewMockOutboxRepository()
 	pub := mockpub.NewMockPublisher()
 	logger := zap.NewNop()
 
-	uc := NewSubmitJobUsecase(repo, pub, logger)
+	uc := NewSubmitJobUsecase(outbox, pub, logger)
 
 	req := &domain.SubmitRequest{
 		Language:   domain.LangPython,
@@ -40,7 +40,7 @@ func TestSubmitJob_Success(t *testing.T) {
 	}
 
 	// Verify job was stored in repo
-	jobs := repo.GetAll()
+	jobs := outbox.Jobs()
 	if len(jobs) != 1 {
 		t.Fatalf("expected 1 job in repo, got %d", len(jobs))
 	}
@@ -61,11 +61,11 @@ func TestSubmitJob_Success(t *testing.T) {
 }
 
 func TestSubmitJob_InvalidLanguage(t *testing.T) {
-	repo := mockrepo.NewMockJobRepository()
+	outbox := mockrepo.NewMockOutboxRepository()
 	pub := mockpub.NewMockPublisher()
 	logger := zap.NewNop()
 
-	uc := NewSubmitJobUsecase(repo, pub, logger)
+	uc := NewSubmitJobUsecase(outbox, pub, logger)
 
 	req := &domain.SubmitRequest{
 		Language:   domain.Language("ruby"),
@@ -79,11 +79,11 @@ func TestSubmitJob_InvalidLanguage(t *testing.T) {
 }
 
 func TestSubmitJob_EmptySourceCode(t *testing.T) {
-	repo := mockrepo.NewMockJobRepository()
+	outbox := mockrepo.NewMockOutboxRepository()
 	pub := mockpub.NewMockPublisher()
 	logger := zap.NewNop()
 
-	uc := NewSubmitJobUsecase(repo, pub, logger)
+	uc := NewSubmitJobUsecase(outbox, pub, logger)
 
 	req := &domain.SubmitRequest{
 		Language:   domain.LangPython,
@@ -97,11 +97,11 @@ func TestSubmitJob_EmptySourceCode(t *testing.T) {
 }
 
 func TestSubmitJob_PayloadTooLarge(t *testing.T) {
-	repo := mockrepo.NewMockJobRepository()
+	outbox := mockrepo.NewMockOutboxRepository()
 	pub := mockpub.NewMockPublisher()
 	logger := zap.NewNop()
 
-	uc := NewSubmitJobUsecase(repo, pub, logger)
+	uc := NewSubmitJobUsecase(outbox, pub, logger)
 
 	// Create source code larger than 1MB
 	largeCode := make([]byte, maxSourceCodeSize+1)
@@ -121,11 +121,11 @@ func TestSubmitJob_PayloadTooLarge(t *testing.T) {
 }
 
 func TestSubmitJob_CustomLimits(t *testing.T) {
-	repo := mockrepo.NewMockJobRepository()
+	outbox := mockrepo.NewMockOutboxRepository()
 	pub := mockpub.NewMockPublisher()
 	logger := zap.NewNop()
 
-	uc := NewSubmitJobUsecase(repo, pub, logger)
+	uc := NewSubmitJobUsecase(outbox, pub, logger)
 
 	timeLimit := 10000
 	memLimit := 131072
@@ -141,7 +141,7 @@ func TestSubmitJob_CustomLimits(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	jobs := repo.GetAll()
+	jobs := outbox.Jobs()
 	if len(jobs) != 1 {
 		t.Fatalf("expected 1 job, got %d", len(jobs))
 	}
@@ -154,58 +154,87 @@ func TestSubmitJob_CustomLimits(t *testing.T) {
 	_ = resp
 }
 
-func TestSubmitJob_PublishFailure(t *testing.T) {
-	repo := mockrepo.NewMockJobRepository()
+// A broker outage must NOT fail the submission.
+//
+// This test previously asserted the opposite — that a publish failure returned
+// ErrPublishFailed and flipped the job to INTERNAL_ERROR. That was correct for
+// the old design, where the message existed nowhere but in the failed publish
+// call. With the transactional outbox the message is already durable when the
+// transaction commits, so the honest answer to the client is "accepted", and
+// delivery becomes the relay's responsibility.
+func TestSubmitJob_BrokerDown_StillAccepts(t *testing.T) {
+	outbox := mockrepo.NewMockOutboxRepository()
 	pub := mockpub.NewMockPublisher()
 	pub.PublishFn = func(ctx context.Context, job *domain.Job) error {
 		return errors.New("connection refused")
 	}
-	logger := zap.NewNop()
 
-	uc := NewSubmitJobUsecase(repo, pub, logger)
+	uc := NewSubmitJobUsecase(outbox, pub, zap.NewNop())
 
-	req := &domain.SubmitRequest{
+	resp, err := uc.Execute(context.Background(), &domain.SubmitRequest{
 		Language:   domain.LangPython,
 		SourceCode: "print('hello')",
+	})
+	if err != nil {
+		t.Fatalf("a broker outage must not fail submission: %v", err)
+	}
+	if resp.Status != string(domain.StatusQueued) {
+		t.Errorf("expected QUEUED, got %s", resp.Status)
 	}
 
-	_, err := uc.Execute(context.Background(), req)
-	if !errors.Is(err, domain.ErrPublishFailed) {
-		t.Errorf("expected ErrPublishFailed, got %v", err)
-	}
-
-	// Job should be in repo with INTERNAL_ERROR status
-	jobs := repo.GetAll()
+	jobs := outbox.Jobs()
 	if len(jobs) != 1 {
-		t.Fatalf("expected 1 job, got %d", len(jobs))
+		t.Fatalf("expected the job row to be committed, got %d", len(jobs))
 	}
-	if jobs[0].Status != domain.StatusInternalError {
-		t.Errorf("expected INTERNAL_ERROR status, got %s", jobs[0].Status)
+	if jobs[0].Status != domain.StatusQueued {
+		t.Errorf("job must stay QUEUED for the relay to deliver, got %s", jobs[0].Status)
+	}
+	// The outbox entry must survive so the relay has something to deliver.
+	if outbox.PendingCount() != 1 {
+		t.Errorf("expected 1 unpublished outbox entry, got %d", outbox.PendingCount())
 	}
 }
 
-func TestSubmitJob_RepoCreateFailure(t *testing.T) {
-	repo := mockrepo.NewMockJobRepository()
-	repo.CreateFunc = func(ctx context.Context, job *domain.Job) error {
+// The happy path must clear the outbox entry, or the relay would publish a
+// duplicate for every successful submission.
+func TestSubmitJob_SuccessClearsOutboxEntry(t *testing.T) {
+	outbox := mockrepo.NewMockOutboxRepository()
+	pub := mockpub.NewMockPublisher()
+
+	uc := NewSubmitJobUsecase(outbox, pub, zap.NewNop())
+	if _, err := uc.Execute(context.Background(), &domain.SubmitRequest{
+		Language:   domain.LangPython,
+		SourceCode: "print('hello')",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(pub.Published) != 1 {
+		t.Errorf("expected an inline publish, got %d", len(pub.Published))
+	}
+	if outbox.PendingCount() != 0 {
+		t.Errorf("expected the outbox entry to be cleared, got %d pending", outbox.PendingCount())
+	}
+}
+
+// If the transaction fails, nothing is published and nothing is stored.
+func TestSubmitJob_TransactionFailure(t *testing.T) {
+	outbox := mockrepo.NewMockOutboxRepository()
+	outbox.CreateFunc = func(ctx context.Context, job *domain.Job) error {
 		return errors.New("database unavailable")
 	}
 	pub := mockpub.NewMockPublisher()
-	logger := zap.NewNop()
 
-	uc := NewSubmitJobUsecase(repo, pub, logger)
-
-	req := &domain.SubmitRequest{
+	uc := NewSubmitJobUsecase(outbox, pub, zap.NewNop())
+	_, err := uc.Execute(context.Background(), &domain.SubmitRequest{
 		Language:   domain.LangPython,
 		SourceCode: "print('hello')",
-	}
-
-	_, err := uc.Execute(context.Background(), req)
+	})
 	if err == nil {
-		t.Error("expected error on repo failure")
+		t.Error("expected an error when the transaction fails")
 	}
-	// Should NOT have published
 	if len(pub.Published) != 0 {
-		t.Error("should not publish when repo create fails")
+		t.Error("must not publish a job that was never committed")
 	}
 }
 
@@ -213,9 +242,11 @@ func TestGetJob_Success(t *testing.T) {
 	repo := mockrepo.NewMockJobRepository()
 	logger := zap.NewNop()
 
-	// Pre-populate a job
+	// Pre-populate a job. The outbox is backed by the same job store, mirroring
+	// the single transaction that writes both in production.
+	outbox := mockrepo.NewMockOutboxRepository().BackedBy(repo)
 	pub := mockpub.NewMockPublisher()
-	submitUC := NewSubmitJobUsecase(repo, pub, logger)
+	submitUC := NewSubmitJobUsecase(outbox, pub, logger)
 
 	req := &domain.SubmitRequest{
 		Language:   domain.LangPython,

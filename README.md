@@ -1,6 +1,20 @@
 # 🛡️ Sentinel
 
-> **Distributed Remote Code Execution Engine** — Execute untrusted code safely at scale with sub-second latency.
+> **Distributed Remote Code Execution Engine** — Execute untrusted Python and C++ in an nsjail sandbox, queued through RabbitMQ and executed by a horizontally scalable worker pool.
+>
+>
+> **Measured overhead** (single node, Docker Compose, `WORKER_POOL_SIZE=4`; worker-side execution wall time, sandbox setup included):
+>
+> | Language | n | min | median | p90 | max |
+> |---|---|---|---|---|---|
+> | Python (trivial program) | 25 | 18.9 ms | **25.7 ms** | 44.9 ms | 66.0 ms |
+> | C++ (compile + run) | 10 | 213.4 ms | **229.0 ms** | 329.0 ms | 329.0 ms |
+>
+> Latency past that is the submitted program's own runtime. These are small-sample
+> local numbers on one machine — they are *not* a load test, and no throughput or
+> percentile figure at scale has been measured. Concurrency was verified
+> separately: 4 concurrent 3-second jobs complete in ~3 s wall clock rather than
+> ~12 s (`scripts/integration-test.sh`).
 
 [![CI](https://github.com/Harsh-BH/Sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/Harsh-BH/Sentinel/actions)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)](https://go.dev)
@@ -38,7 +52,7 @@
 - **Filesystem**: Read-only `pivot_root` with tmpfs scratch space
 - **Namespaces**: Full isolation (PID, NET, MNT, UTS, IPC, USER, CGROUP) — the empty network namespace means no network access
 - **Cgroups v2**: Memory (256MB), PIDs (64), CPU (1 core) limits
-- **Seccomp-BPF**: Kafel syscall-allowlist policies are authored in `sandbox/policies/` but **not yet enforced** — the `seccomp_policy_file:` directive is commented out in `sandbox/nsjail/*.cfg` pending a kafel syscall-table audit (see [design doc 0001](docs/design/0001-sandbox-security.md)). Isolation currently rests on namespaces + cgroups + no-network.
+- **Seccomp-BPF**: Kafel syscall allowlists in `sandbox/policies/`, **enforced** with `DEFAULT KILL` — every syscall not on the list terminates the process. The list was built from `strace -f` traces of CPython and g++ rather than guessed. Notably absent: the entire `socket`/`connect`/`bind` family (so no network syscall reaches the kernel even if the netns regressed), `ptrace`, `mount`/`pivot_root`/`unshare`/`setns`, `bpf`, `perf_event_open`, `io_uring_setup`, `userfaultfd`, module loading, and `setuid`/`capset`. Verified end-to-end: `socket()` and `ptrace()` are killed, while threads, file I/O, `platform.uname()` and `os.cpu_count()` still work.
 - **Timeouts**: Hard wall-clock limit (10s default) + process-group kill
 
 ---

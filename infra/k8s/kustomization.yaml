@@ -11,9 +11,11 @@ kind: Kustomization
 
 namespace: sentinel
 
-commonLabels:
-  app.kubernetes.io/managed-by: kustomize
-  app.kubernetes.io/part-of: sentinel
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/managed-by: kustomize
+      app.kubernetes.io/part-of: sentinel
 
 resources:
   # 1. Namespace + governance
@@ -40,6 +42,25 @@ resources:
 
   # 7. Network Policies
   - network-policies.yaml
+
+# Generate the Postgres init ConfigMap from a drift-checked copy of the
+# migration, so the schema has exactly ONE authoritative source
+# (migrations/001_initial_schema.up.sql).
+#
+# It used to be a hand-copied literal inside configmaps.yaml that had drifted
+# into invalid DDL: it declared `job_id UUID PRIMARY KEY` on a table partitioned
+# by created_at, which Postgres rejects ("unique constraint on partitioned table
+# must include all partitioning columns"). The schema therefore never applied and
+# the k8s deployment could not have worked. Generating removes the copy.
+configMapGenerator:
+  - name: sentinel-postgres-init
+    files:
+      - 001_initial_schema.sql=generated/postgres-init.sql
+
+# Keep the generated name stable — the StatefulSet references it by name and a
+# hash suffix would break the reference on every schema change.
+generatorOptions:
+  disableNameSuffixHash: true
 
 # NOTE: Monitoring stack (infra/k8s/monitoring/) uses its own kustomization
 # with a separate namespace. Apply separately:

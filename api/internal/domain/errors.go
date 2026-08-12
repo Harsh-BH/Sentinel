@@ -15,6 +15,11 @@ var (
 	// ErrEmptySourceCode is returned when source code is empty.
 	ErrEmptySourceCode = errors.New("source code cannot be empty")
 
+	// ErrInvalidLimit is returned when a requested time or memory limit is out of
+	// range. Rejecting is deliberate: silently substituting the default made the
+	// API's behaviour undetectable from the caller's side.
+	ErrInvalidLimit = errors.New("invalid resource limit")
+
 	// ErrRateLimitExceeded is returned when API rate limit is hit.
 	ErrRateLimitExceeded = errors.New("rate limit exceeded, try again later")
 

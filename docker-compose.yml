@@ -59,9 +59,15 @@ services:
   redis:
     image: redis:7-alpine
     container_name: sentinel-redis
+    # Redis now holds ONLY rate-limit windows. Job deduplication moved into
+    # Postgres (a lease column), so allkeys-lru evicting a key here degrades
+    # rate limiting for one IP instead of causing a duplicate execution.
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
-      - "6380:6379"
+      # Host port is configurable because 6379/6380 frequently collide with a
+      # locally installed Redis or another project's stack. Only the host side
+      # matters — services reach Redis at redis:6379 over the compose network.
+      - "${REDIS_HOST_PORT:-6380}:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -84,8 +90,16 @@ services:
       - "8080:8080"
     environment:
       API_PORT: "8080"
-      GIN_MODE: "debug"
+      GIN_MODE: "release"
       API_RATE_LIMIT: "100"
+      # Frontend origin only. "*" would let any page on the internet read a
+      # submission (source code included) given a job ID, since there is no auth.
+      API_ALLOWED_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173"
+      # nginx in the frontend container is the only proxy in front of the API.
+      API_TRUSTED_PROXIES: ""
+      # Sweep often: recovery latency for a crashed worker is lease expiry plus
+      # up to one sweep interval.
+      API_REAP_INTERVAL: "15s"
       API_READ_TIMEOUT: "10s"
       API_WRITE_TIMEOUT: "30s"
       DATABASE_URL: "postgres://sentinel:sentinel_secret@postgres:5432/sentinel?sslmode=disable"
@@ -99,7 +113,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/v1/health"]
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/api/v1/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -119,14 +133,15 @@ services:
     environment:
       DATABASE_URL: "postgres://sentinel:sentinel_secret@postgres:5432/sentinel?sslmode=disable"
       RABBITMQ_URL: "amqp://sentinel:sentinel_secret@rabbitmq:5672/"
-      REDIS_URL: "redis://redis:6379/0"
+      # No REDIS_URL: the worker does not talk to Redis any more. Deduplication
+      # is a conditional UPDATE on execution_jobs, so an evicted cache key can no
+      # longer cause a double execution and a Redis outage cannot fail jobs.
       WORKER_POOL_SIZE: "4"
       WORKER_METRICS_PORT: "9090"
+      # Must stay below the container stop grace period so in-flight jobs finish.
+      WORKER_DRAIN_TIMEOUT: "45s"
       WORKER_NSJAIL_PATH: "/usr/bin/nsjail"
       WORKER_SANDBOX_CONFIG_DIR: "/etc/sentinel/nsjail"
-      WORKER_POLICY_DIR: "/etc/sentinel/policies"
-      WORKER_DEFAULT_TIME_LIMIT_MS: "5000"
-      WORKER_DEFAULT_MEMORY_LIMIT_KB: "262144"
     ports:
       - "9090:9090"    # Prometheus metrics
     depends_on:
@@ -136,8 +151,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Docker sends SIGKILL this long after SIGTERM. Must exceed
+    # WORKER_DRAIN_TIMEOUT or draining is pointless.
+    stop_grace_period: 60s
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9090/healthz"]
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9090/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -152,13 +170,18 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: sentinel-frontend
+    environment:
+      # nginx proxies /api to the API service. Docker's embedded DNS lives at
+      # 127.0.0.11; Kubernetes overrides both of these.
+      API_UPSTREAM: "api:8080"
+      DNS_RESOLVER: "127.0.0.11"
     ports:
       - "3000:80"
     depends_on:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/nginx-health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
       interval: 10s
       timeout: 3s
       retries: 3

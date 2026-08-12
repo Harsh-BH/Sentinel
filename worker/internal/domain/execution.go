@@ -39,6 +39,16 @@ const (
 	LangCpp    Language = "cpp"
 )
 
+// CompileTimeLimit is the wall-clock budget for the C++ compile pass. It is
+// deliberately independent of the job's own TimeLimitMs, which governs how long
+// the *compiled program* may run — a 100 ms runtime budget must not mean g++
+// only gets 100 ms to compile.
+const CompileTimeLimit = 10 * time.Second
+
+// CompileMemoryLimitKB is the memory budget for the compile pass. g++ needs far
+// more headroom than most compiled programs do.
+const CompileMemoryLimitKB = 512 * 1024
+
 // Job represents a code execution job (received from the queue).
 type Job struct {
 	JobID         uuid.UUID       `json:"job_id"`

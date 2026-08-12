@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -18,12 +19,20 @@ var _ repository.JobRepository = (*JobRepository)(nil)
 type JobRepository struct {
 	mu sync.Mutex
 
-	UpdateStatusFn func(ctx context.Context, id uuid.UUID, status domain.ExecutionStatus) error
-	SetResultFn    func(ctx context.Context, id uuid.UUID, result *domain.ExecutionResult) error
+	ClaimFn     func(ctx context.Context, id uuid.UUID, createdAt time.Time, status domain.ExecutionStatus, lease time.Duration) (repository.ClaimOutcome, error)
+	SetResultFn func(ctx context.Context, id uuid.UUID, createdAt time.Time, result *domain.ExecutionResult) error
+	SetStatusFn func(ctx context.Context, id uuid.UUID, createdAt time.Time, status domain.ExecutionStatus) error
 
 	// Recorded calls for assertions.
+	Claims        []ClaimCall
 	StatusUpdates []StatusUpdate
 	Results       []ResultUpdate
+}
+
+type ClaimCall struct {
+	ID     uuid.UUID
+	Status domain.ExecutionStatus
+	Lease  time.Duration
 }
 
 type StatusUpdate struct {
@@ -36,59 +45,64 @@ type ResultUpdate struct {
 	Result *domain.ExecutionResult
 }
 
-func (m *JobRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status domain.ExecutionStatus) error {
+func (m *JobRepository) Claim(
+	ctx context.Context,
+	id uuid.UUID,
+	createdAt time.Time,
+	status domain.ExecutionStatus,
+	lease time.Duration,
+) (repository.ClaimOutcome, error) {
 	m.mu.Lock()
-	m.StatusUpdates = append(m.StatusUpdates, StatusUpdate{ID: id, Status: status})
+	m.Claims = append(m.Claims, ClaimCall{ID: id, Status: status, Lease: lease})
 	m.mu.Unlock()
-	if m.UpdateStatusFn != nil {
-		return m.UpdateStatusFn(ctx, id, status)
+	if m.ClaimFn != nil {
+		return m.ClaimFn(ctx, id, createdAt, status, lease)
 	}
-	return nil
+	return repository.ClaimAcquired, nil
 }
 
-func (m *JobRepository) SetResult(ctx context.Context, id uuid.UUID, result *domain.ExecutionResult) error {
+func (m *JobRepository) SetResult(
+	ctx context.Context,
+	id uuid.UUID,
+	createdAt time.Time,
+	result *domain.ExecutionResult,
+) error {
 	m.mu.Lock()
 	m.Results = append(m.Results, ResultUpdate{ID: id, Result: result})
 	m.mu.Unlock()
 	if m.SetResultFn != nil {
-		return m.SetResultFn(ctx, id, result)
+		return m.SetResultFn(ctx, id, createdAt, result)
 	}
 	return nil
 }
 
-// ---- IdempotencyStore mock ----
-
-var _ repository.IdempotencyStore = (*IdempotencyStore)(nil)
-
-// IdempotencyStore is a test double for repository.IdempotencyStore.
-type IdempotencyStore struct {
-	mu sync.Mutex
-
-	AcquireLockFn func(ctx context.Context, jobID uuid.UUID) (bool, error)
-	ReleaseLockFn func(ctx context.Context, jobID uuid.UUID) error
-
-	AcquireCalls []uuid.UUID
-	ReleaseCalls []uuid.UUID
-}
-
-func (m *IdempotencyStore) AcquireLock(ctx context.Context, jobID uuid.UUID) (bool, error) {
+func (m *JobRepository) SetStatus(
+	ctx context.Context,
+	id uuid.UUID,
+	createdAt time.Time,
+	status domain.ExecutionStatus,
+) error {
 	m.mu.Lock()
-	m.AcquireCalls = append(m.AcquireCalls, jobID)
+	m.StatusUpdates = append(m.StatusUpdates, StatusUpdate{ID: id, Status: status})
 	m.mu.Unlock()
-	if m.AcquireLockFn != nil {
-		return m.AcquireLockFn(ctx, jobID)
-	}
-	return true, nil // default: lock acquired
-}
-
-func (m *IdempotencyStore) ReleaseLock(ctx context.Context, jobID uuid.UUID) error {
-	m.mu.Lock()
-	m.ReleaseCalls = append(m.ReleaseCalls, jobID)
-	m.mu.Unlock()
-	if m.ReleaseLockFn != nil {
-		return m.ReleaseLockFn(ctx, jobID)
+	if m.SetStatusFn != nil {
+		return m.SetStatusFn(ctx, id, createdAt, status)
 	}
 	return nil
+}
+
+// ClaimCallCount returns how many times Claim was invoked.
+func (m *JobRepository) ClaimCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.Claims)
+}
+
+// ResultCount returns how many times SetResult was invoked.
+func (m *JobRepository) ResultCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.Results)
 }
 
 // ---- Executor mock ----
@@ -117,4 +131,11 @@ func (m *Executor) Execute(ctx context.Context, req *domain.ExecutionRequest) (*
 		ExitCode:   0,
 		TimeUsedMs: 42,
 	}, nil
+}
+
+// ExecuteCallCount returns how many times Execute was invoked.
+func (m *Executor) ExecuteCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.ExecuteCalls)
 }

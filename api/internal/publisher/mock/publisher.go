@@ -14,6 +14,7 @@ var _ publisher.Publisher = (*MockPublisher)(nil)
 type MockPublisher struct {
 	Published []*domain.Job
 	PublishFn func(ctx context.Context, job *domain.Job) error
+	Unhealthy bool
 }
 
 // NewMockPublisher creates a new mock publisher.
@@ -27,6 +28,10 @@ func (m *MockPublisher) Publish(ctx context.Context, job *domain.Job) error {
 	}
 	m.Published = append(m.Published, job)
 	return nil
+}
+
+func (m *MockPublisher) Healthy() bool {
+	return !m.Unhealthy
 }
 
 func (m *MockPublisher) Close() error {

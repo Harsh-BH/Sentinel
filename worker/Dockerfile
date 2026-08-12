@@ -18,10 +18,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-RUN git clone --depth 1 https://github.com/google/nsjail.git && \
+
+# Pin nsjail to an exact commit.
+#
+# This used to be `git clone --depth 1` of the default branch — i.e. whatever was
+# on master the day the image happened to be built — under a comment claiming the
+# build was pinned for reproducibility. nsjail is the security boundary of this
+# entire system; two builds a week apart could contain different sandbox code
+# with no record of the change.
+ARG NSJAIL_REF=f78475530b46d0186111a9096b30725f816b55fe
+RUN git clone https://github.com/google/nsjail.git && \
     cd nsjail && \
-    make -j$(nproc) && \
-    mv nsjail /usr/local/bin/nsjail
+    git checkout --quiet "${NSJAIL_REF}" && \
+    git submodule update --init --recursive --depth 1 && \
+    make -j"$(nproc)" && \
+    strip nsjail && \
+    mv nsjail /usr/local/bin/nsjail && \
+    /usr/local/bin/nsjail --help >/dev/null 2>&1 || true
 
 # ── Stage 2: Build Go worker ──────────────────────────────
 FROM golang:1.23-bookworm AS go-builder
@@ -59,28 +72,27 @@ COPY --from=nsjail-builder /usr/local/bin/nsjail /usr/bin/nsjail
 # Copy worker binary from builder
 COPY --from=go-builder /sentinel-worker /usr/local/bin/sentinel-worker
 
-# Copy sandbox nsjail configs and seccomp policies
+# Copy sandbox nsjail configs and seccomp policies.
+# This is the single copy of these files that reaches production — there is no
+# ConfigMap duplicate (see infra/k8s/configmaps.yaml for why).
 COPY sandbox/nsjail/ /etc/sentinel/nsjail/
 COPY sandbox/policies/ /etc/sentinel/policies/
 
-# Create sandbox temp directory
+# Sandbox scratch space. In Kubernetes TMPDIR is pointed at a size-limited
+# emptyDir instead; see infra/k8s/worker-deployment.yaml.
 RUN mkdir -p /tmp/sentinel && chmod 1777 /tmp/sentinel
 
-# Create sandbox rootfs with required system directories
-# nsjail bind-mounts these into the namespace
-RUN mkdir -p /sandbox/rootfs /sandbox/rootfs/dev /sandbox/rootfs/proc \
-        /sandbox/rootfs/tmp /sandbox/rootfs/home/runner /sandbox/rootfs/etc && \
-    cp -a /usr /sandbox/rootfs/ && \
-    cp -a /lib /sandbox/rootfs/ && \
-    (cp -a /lib64 /sandbox/rootfs/ 2>/dev/null || true) && \
-    cp -a /bin /sandbox/rootfs/ && \
-    (cp -a /etc/alternatives /sandbox/rootfs/etc/ 2>/dev/null || true) && \
-    chmod 1777 /sandbox/rootfs/tmp
+# NOTE: there is deliberately no /sandbox/rootfs here.
+#
+# A previous layer built one by copying /usr, /lib and /bin into it — roughly
+# 400 MB — but the nsjail configs bind-mount those paths from the container root
+# (`mount { src: "/usr" dst: "/usr" }`), so nothing ever read /sandbox/rootfs. It
+# was pure image weight.
 
 EXPOSE 9090
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=5 \
-    CMD curl -sf http://localhost:9090/healthz || exit 1
+    CMD curl -sf http://127.0.0.1:9090/readyz || exit 1
 
 # Worker MUST run as root — nsjail needs CAP_SYS_ADMIN for namespace creation.
 # nsjail itself drops privileges inside the sandbox via uidmap/gidmap.

@@ -29,6 +29,9 @@ const (
 // Publisher defines the interface for publishing jobs to the message broker.
 type Publisher interface {
 	Publish(ctx context.Context, job *domain.Job) error
+	// Healthy reports whether the underlying broker connection is usable. Health
+	// checks call this instead of opening a new connection per probe.
+	Healthy() bool
 	Close() error
 }
 
@@ -231,6 +234,13 @@ func (p *rabbitPublisher) Publish(ctx context.Context, job *domain.Job) error {
 		zap.Int("body_size", len(body)),
 	)
 	return nil
+}
+
+func (p *rabbitPublisher) Healthy() bool {
+	p.mu.RLock()
+	conn, ch := p.conn, p.channel
+	p.mu.RUnlock()
+	return conn != nil && !conn.IsClosed() && ch != nil
 }
 
 func (p *rabbitPublisher) Close() error {
